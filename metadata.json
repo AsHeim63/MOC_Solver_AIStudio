@@ -1,0 +1,5 @@
+{
+  "name": "HydroGuard: Water Transient Analyzer",
+  "description": "A professional-grade water hammer simulation tool using the Method of Characteristics to analyze pump trip transients and pressure envelopes.",
+  "requestFramePermissions": []
+}

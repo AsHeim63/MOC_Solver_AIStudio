@@ -1,0 +1,527 @@
+import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
+
+const G = 9.81;
+const VAPOR_PRESSURE_HEAD_REL = -9.8; // m
+
+// --- GLOBAL DATA STRUCTURES ---
+class SystemState {
+    H: Float64Array;
+    Q_in: Float64Array;
+    Q_out: Float64Array;
+    V_cav: Float64Array;
+    C_g: Float64Array;
+    Z: Float64Array;
+
+    constructor(totalNodes: number) {
+        this.H = new Float64Array(totalNodes);
+        this.Q_in = new Float64Array(totalNodes);
+        this.Q_out = new Float64Array(totalNodes);
+        this.V_cav = new Float64Array(totalNodes);
+        this.C_g = new Float64Array(totalNodes);
+        this.Z = new Float64Array(totalNodes);
+    }
+
+    copyFrom(other: SystemState) {
+        this.H.set(other.H);
+        this.Q_in.set(other.Q_in);
+        this.Q_out.set(other.Q_out);
+        this.V_cav.set(other.V_cav);
+        // Z and C_g are constant node properties, no need to copy them every step
+    }
+}
+
+interface PipeParams {
+    a: number;
+    A: number;
+    D: number;
+    f: number;
+    dx: number;
+    N: number;
+    startNode: number;
+}
+
+interface GridParams {
+    dt: number;
+}
+
+interface CharCoefs {
+    Cp: number;
+    Cm: number;
+    B1: number;
+    B2: number;
+}
+
+// --- SUBROUTINES ---
+
+function COMPUTE_CHARACTERISTICS(
+    idx: number,
+    state: SystemState,
+    pUp: PipeParams | null,
+    pDown: PipeParams | null
+): CharCoefs {
+    let Cp = 0, Cm = 0, B1 = 0, B2 = 0;
+
+    if (pUp) {
+        B1 = pUp.a / (G * pUp.A);
+        const R1 = (pUp.f * pUp.dx) / (2 * G * pUp.D * pUp.A * pUp.A);
+        const HA = state.H[idx - 1];
+        const QA = state.Q_out[idx - 1];
+        Cp = HA + B1 * QA - R1 * QA * Math.abs(QA);
+    }
+
+    if (pDown) {
+        B2 = pDown.a / (G * pDown.A);
+        const R2 = (pDown.f * pDown.dx) / (2 * G * pDown.D * pDown.A * pDown.A);
+        const HB = state.H[idx + 1];
+        const QB = state.Q_in[idx + 1];
+        // C- characteristic: HP = (HB - B*QB + R*QB*|QB|) + B*QP
+        Cm = HB - B2 * QB + R2 * QB * Math.abs(QB);
+    }
+
+    return { Cp, Cm, B1, B2 };
+}
+
+function CALC_INTERIOR_DVCM(
+    idx: number,
+    coefs: CharCoefs,
+    prevState: SystemState,
+    newState: SystemState,
+    grid: GridParams
+) {
+    const { Cp, Cm, B1 } = coefs;
+    const B = B1;
+    const H_vap = prevState.Z[idx] + VAPOR_PRESSURE_HEAD_REL;
+    const dt = grid.dt;
+
+    const H_liquid = (Cp + Cm) / 2;
+    
+    if (H_liquid < H_vap || prevState.V_cav[idx] > 0) {
+        // Cavitation (DVCM)
+        newState.H[idx] = H_vap;
+        const Q_in = (Cp - H_vap) / B;
+        const Q_out = (H_vap - Cm) / B;
+        const V_new = prevState.V_cav[idx] + dt * (Q_out - Q_in);
+        
+        if (V_new <= 0) {
+            // Cavity collapsed - calculate surge head
+            newState.V_cav[idx] = 0;
+            newState.H[idx] = H_liquid;
+            newState.Q_in[idx] = (Cp - H_liquid) / B;
+            newState.Q_out[idx] = (H_liquid - Cm) / B;
+        } else {
+            // Cavity active - head is anchored to vapor pressure
+            newState.H[idx] = H_vap;
+            newState.Q_in[idx] = Q_in;
+            newState.Q_out[idx] = Q_out;
+            newState.V_cav[idx] = V_new;
+        }
+    } else {
+        // Liquid
+        newState.H[idx] = H_liquid;
+        newState.Q_in[idx] = (Cp - H_liquid) / B;
+        newState.Q_out[idx] = (H_liquid - Cm) / B;
+        newState.V_cav[idx] = 0;
+    }
+}
+
+function CALC_JUNCTION_DVCM(
+    idx: number,
+    coefs: CharCoefs,
+    prevState: SystemState,
+    newState: SystemState,
+    grid: GridParams
+) {
+    const { Cp, Cm, B1, B2 } = coefs;
+    const H_vap = prevState.Z[idx] + VAPOR_PRESSURE_HEAD_REL;
+    const dt = grid.dt;
+
+    const H_liquid = (Cp / B1 + Cm / B2) / (1 / B1 + 1 / B2);
+    
+    if (H_liquid < H_vap || prevState.V_cav[idx] > 0) {
+        // Cavitation (DVCM)
+        newState.H[idx] = H_vap;
+        const Q_in = (Cp - H_vap) / B1;
+        const Q_out = (H_vap - Cm) / B2;
+        const V_new = prevState.V_cav[idx] + dt * (Q_out - Q_in);
+        
+        if (V_new <= 0) {
+            // Cavity collapsed - calculate surge head
+            newState.V_cav[idx] = 0;
+            newState.H[idx] = H_liquid;
+            newState.Q_in[idx] = (Cp - H_liquid) / B1;
+            newState.Q_out[idx] = (H_liquid - Cm) / B2;
+        } else {
+            // Cavity active - head is anchored to vapor pressure
+            newState.H[idx] = H_vap;
+            newState.Q_in[idx] = Q_in;
+            newState.Q_out[idx] = Q_out;
+            newState.V_cav[idx] = V_new;
+        }
+    } else {
+        newState.H[idx] = H_liquid;
+        newState.Q_in[idx] = (Cp - H_liquid) / B1;
+        newState.Q_out[idx] = (H_liquid - Cm) / B2;
+        newState.V_cav[idx] = 0;
+    }
+}
+
+function CALC_BC_RESERVOIR(
+    idx: number,
+    coefs: CharCoefs,
+    newState: SystemState,
+    H_res: number
+) {
+    const { Cp, B1 } = coefs;
+    newState.H[idx] = H_res;
+    newState.Q_in[idx] = (Cp - H_res) / B1;
+    newState.Q_out[idx] = newState.Q_in[idx];
+    newState.V_cav[idx] = 0;
+}
+
+function CALC_BC_PUMP(
+    idx: number,
+    coefs: CharCoefs,
+    prevState: SystemState,
+    newState: SystemState,
+    grid: GridParams,
+    pump: PumpParams,
+    steadyPumpHead: number,
+    t: number
+) {
+    const { Cm, B2 } = coefs;
+    const B = B2;
+    const dt = grid.dt;
+    
+    let alpha = 1.0;
+    if (t > pump.tripTime) {
+        alpha = Math.max(0, 1 - (t - pump.tripTime) / (pump.haltTime - pump.tripTime));
+    }
+
+    // Use a more realistic pump curve: H = H_shutoff * (1 - (Q/Q_max)^2)
+    // Assume H_shutoff = 1.33 * steady head, which implies Q_max = 2 * steady flow
+    const Hs = 1.33 * steadyPumpHead;
+    const Qmax = 2.0 * pump.initialFlow;
+    const k_pump = Hs / Math.pow(Qmax, 2);
+    
+    const a_quad = k_pump;
+    const b_quad = B;
+    const c_quad = Cm - Hs * Math.pow(alpha, 2);
+    
+    const discriminant = b_quad * b_quad - 4 * a_quad * c_quad;
+    let qPump = 0;
+    if (discriminant >= 0) {
+        qPump = Math.max(0, (-b_quad + Math.sqrt(discriminant)) / (2 * a_quad));
+    }
+
+    const H_vap = prevState.Z[idx] + VAPOR_PRESSURE_HEAD_REL;
+    
+    let H_liquid = Cm;
+    let Q_liquid = 0;
+    if (qPump > 0) {
+        H_liquid = Cm + B * qPump;
+        Q_liquid = qPump;
+    }
+
+    // DVCM for macroscopic column separation at pump
+    if (H_liquid < H_vap || prevState.V_cav[idx] > 0) {
+        newState.H[idx] = H_vap;
+        
+        let qPump_cav = 0;
+        // Only allow flow from pump if it's still running or if we assume a suction source
+        // For a tripped pump with a check valve, flow should be 0 or positive (if suction head > H_vap)
+        // Here we assume suction head is 0 relative to pump elevation if stopped
+        if (alpha > 0.001) {
+            let head_diff = Hs * Math.pow(alpha, 2) - H_vap;
+            if (head_diff > 0) {
+                qPump_cav = Math.sqrt(head_diff / k_pump);
+            }
+        }
+        
+        newState.Q_in[idx] = qPump_cav; 
+        newState.Q_out[idx] = (H_vap - Cm) / B;
+        
+        newState.V_cav[idx] = prevState.V_cav[idx] + dt * (newState.Q_out[idx] - newState.Q_in[idx]);
+        
+        if (newState.V_cav[idx] <= 0) {
+            // Cavity collapsed - ensure surge head is calculated correctly
+            newState.V_cav[idx] = 0;
+            newState.H[idx] = H_liquid;
+            newState.Q_in[idx] = Q_liquid;
+            newState.Q_out[idx] = Q_liquid;
+        } else {
+            // Cavity active - head is anchored to vapor pressure
+            newState.H[idx] = H_vap;
+            newState.Q_in[idx] = qPump_cav;
+            newState.Q_out[idx] = (H_vap - Cm) / B;
+        }
+    } else {
+        newState.H[idx] = H_liquid;
+        newState.Q_in[idx] = Q_liquid;
+        newState.Q_out[idx] = Q_liquid;
+        newState.V_cav[idx] = 0;
+    }
+}
+
+function INIT_STEADY_STATE(
+    state: SystemState,
+    pipes: PipeParams[],
+    pump: PumpParams,
+    reservoir: ReservoirParams
+): number {
+    const totalFrictionLoss = pipes.reduce((acc, p) => {
+        const v = pump.initialFlow / p.A;
+        return acc + (p.f * (p.dx * p.N) * v * v) / (2 * G * p.D);
+    }, 0);
+
+    const steadyPumpHead = reservoir.head + totalFrictionLoss;
+    
+    let currentNode = 0;
+    let currentHead = steadyPumpHead;
+    
+    state.H[0] = currentHead;
+    state.Q_in[0] = pump.initialFlow;
+    state.Q_out[0] = pump.initialFlow;
+    state.V_cav[0] = 0;
+    state.C_g[0] = 0;
+    currentNode++;
+
+    for (const p of pipes) {
+        const v = pump.initialFlow / p.A;
+        const hLossPerDx = (p.f * p.dx * v * v) / (2 * G * p.D);
+        
+        for (let i = 1; i <= p.N; i++) {
+            currentHead -= hLossPerDx;
+            state.H[currentNode] = currentHead;
+            state.Q_in[currentNode] = pump.initialFlow;
+            state.Q_out[currentNode] = pump.initialFlow;
+            
+            const H_vap = state.Z[currentNode] + VAPOR_PRESSURE_HEAD_REL;
+            state.V_cav[currentNode] = 0;
+            state.C_g[currentNode] = 0;
+            
+            currentNode++;
+        }
+    }
+    
+    state.V_cav[currentNode - 1] = 0;
+    state.C_g[currentNode - 1] = 0;
+
+    return steadyPumpHead;
+}
+
+export function runWaterHammerSimulation(
+  inputPipes: PipeSection[],
+  pump: PumpParams,
+  reservoir: ReservoirParams
+): SimulationResults {
+  const baseN = 20;
+  const targetDt = inputPipes[0].length / baseN / inputPipes[0].waveSpeed;
+  const dt = targetDt;
+  
+  const pipes: PipeParams[] = [];
+  let totalNodes = 1;
+  let currentZ = pump.elevation;
+  
+  for (const p of inputPipes) {
+      const N = Math.max(1, Math.round(p.length / (p.waveSpeed * dt)));
+      const actualDx = p.length / N;
+      const actualWaveSpeed = actualDx / dt;
+      const A = Math.PI * Math.pow(p.diameter / 2, 2);
+      
+      pipes.push({
+          a: actualWaveSpeed,
+          A: A,
+          D: p.diameter,
+          f: p.frictionFactor,
+          dx: actualDx,
+          N: N,
+          startNode: totalNodes - 1
+      });
+      totalNodes += N;
+  }
+
+  const prevState = new SystemState(totalNodes);
+  const newState = new SystemState(totalNodes);
+  
+  let nodeIdx = 0;
+  prevState.Z[0] = pump.elevation;
+  nodeIdx++;
+  for (let pIdx = 0; pIdx < inputPipes.length; pIdx++) {
+      const pIn = inputPipes[pIdx];
+      const pParam = pipes[pIdx];
+      const startElev = currentZ;
+      const endElev = pIn.endElevation;
+      for (let i = 1; i <= pParam.N; i++) {
+          prevState.Z[nodeIdx] = startElev + (endElev - startElev) * (i / pParam.N);
+          nodeIdx++;
+      }
+      currentZ = endElev;
+  }
+  
+    const steadyPumpHead = INIT_STEADY_STATE(prevState, pipes, pump, reservoir);
+    
+    // Initialize newState with constant properties
+    newState.Z.set(prevState.Z);
+    newState.C_g.set(prevState.C_g);
+    newState.copyFrom(prevState);
+    
+    const maxH = new Float64Array(totalNodes);
+    const minH = new Float64Array(totalNodes);
+    const maxV = new Float64Array(totalNodes);
+    for (let i = 0; i < totalNodes; i++) {
+        maxH[i] = prevState.H[i];
+        minH[i] = prevState.H[i];
+        maxV[i] = prevState.V_cav[i];
+    }
+
+    const grid: GridParams = { dt };
+    const totalTravelTime = inputPipes.reduce((acc, p) => acc + (p.length / p.waveSpeed), 0);
+    const maxTime = 200 * totalTravelTime; // Increased to allow long cavity collapses
+    const maxSteps = Math.ceil(maxTime / dt);
+    
+    const timeHistory: SimulationResults['timeHistory'] = [];
+    const fullHistory: SimulationResults['fullHistory'] = [];
+    const timeSteps: number[] = [];
+    const staticPressureHead = reservoir.head - pump.elevation;
+    const exitThreshold = Math.max(0.5, 0.05 * staticPressureHead);
+
+    // Record initial state (t=0)
+    timeSteps.push(0);
+    timeHistory.push({
+        time: 0,
+        head: prevState.H[0], // Record head at pump
+        flow: prevState.Q_out[0], // Record flow at pump
+        vaporVolume: prevState.V_cav[0]
+    });
+    fullHistory.push({
+        time: 0,
+        heads: Array.from(prevState.H),
+        flows: Array.from(prevState.Q_out)
+    });
+
+    for (let step = 1; step <= maxSteps; step++) {
+      const t = step * dt;
+      
+      // 1. Pump Boundary (Node 0)
+      const pFirst = pipes[0];
+      const coefsPump = COMPUTE_CHARACTERISTICS(0, prevState, null, pFirst);
+      CALC_BC_PUMP(0, coefsPump, prevState, newState, grid, pump, steadyPumpHead, t);
+      
+      // 2. Interior Nodes and Junctions
+      for (let pIdx = 0; pIdx < pipes.length; pIdx++) {
+          const p = pipes[pIdx];
+          
+          // Interior nodes of this pipe
+          for (let i = 1; i < p.N; i++) {
+              const idx = p.startNode + i;
+              const coefs = COMPUTE_CHARACTERISTICS(idx, prevState, p, p);
+              CALC_INTERIOR_DVCM(idx, coefs, prevState, newState, grid);
+          }
+          
+          // Junction to next pipe
+          if (pIdx < pipes.length - 1) {
+              const pNext = pipes[pIdx + 1];
+              const idx = pNext.startNode;
+              const coefs = COMPUTE_CHARACTERISTICS(idx, prevState, p, pNext);
+              CALC_JUNCTION_DVCM(idx, coefs, prevState, newState, grid);
+          }
+      }
+      
+      // 3. Reservoir Boundary (Last Node)
+      const pLast = pipes[pipes.length - 1];
+      const lastIdx = totalNodes - 1;
+      const coefsRes = COMPUTE_CHARACTERISTICS(lastIdx, prevState, pLast, null);
+      CALC_BC_RESERVOIR(lastIdx, coefsRes, newState, reservoir.head);
+      
+      // Update state and envelopes
+      for (let i = 0; i < totalNodes; i++) {
+          if (newState.H[i] > maxH[i]) maxH[i] = newState.H[i];
+          if (newState.H[i] < minH[i]) minH[i] = newState.H[i];
+          if (newState.V_cav[i] > maxV[i]) maxV[i] = newState.V_cav[i];
+      }
+      prevState.copyFrom(newState);
+      
+      // Record history
+      if (step % 1 === 0) {
+          timeSteps.push(t);
+          timeHistory.push({
+              time: t,
+              head: prevState.H[0], // Record head at pump
+              flow: prevState.Q_out[0], // Record flow at pump
+              vaporVolume: prevState.V_cav[0]
+          });
+          fullHistory.push({
+              time: t,
+              heads: Array.from(prevState.H),
+              flows: Array.from(prevState.Q_out)
+          });
+      }
+      
+      // Exit condition
+      if (t > pump.haltTime + 4 * totalTravelTime) {
+          let isSettled = true;
+          const windowTime = 3 * 4 * totalTravelTime;
+          const startIdx = timeHistory.findIndex(th => th.time > t - windowTime);
+          if (startIdx !== -1 && timeHistory.length - startIdx > 10) {
+              for (let i = startIdx; i < timeHistory.length; i++) {
+                  const pressureHead = timeHistory[i].head - prevState.Z[1];
+                  if (Math.abs(pressureHead - staticPressureHead) > exitThreshold) {
+                      isSettled = false;
+                      break;
+                  }
+              }
+              if (isSettled) break;
+          }
+      }
+  }
+
+  const steadyStateH = new Float64Array(totalNodes);
+  let currentHeadSteady = steadyPumpHead;
+  let sIdx = 0;
+  steadyStateH[sIdx++] = currentHeadSteady;
+  for (const p of pipes) {
+      const v = pump.initialFlow / p.A;
+      const hLossPerDx = (p.f * p.dx * v * v) / (2 * G * p.D);
+      for (let i = 1; i <= p.N; i++) {
+          currentHeadSteady -= hLossPerDx;
+          steadyStateH[sIdx++] = currentHeadSteady;
+      }
+  }
+
+  const nodes = [];
+  let currentX = 0;
+  let nIdx = 0;
+  
+  nodes.push({
+      x: currentX,
+      elevation: prevState.Z[0],
+      maxHead: maxH[0],
+      minHead: minH[0],
+      steadyHead: steadyStateH[0],
+      maxVaporVolume: maxV[0]
+  });
+  nIdx++;
+  
+  for (let pIdx = 0; pIdx < inputPipes.length; pIdx++) {
+      const pParam = pipes[pIdx];
+      for (let i = 1; i <= pParam.N; i++) {
+          currentX += pParam.dx;
+          nodes.push({
+              x: currentX,
+              elevation: prevState.Z[nIdx],
+              maxHead: maxH[nIdx],
+              minHead: minH[nIdx],
+              steadyHead: steadyStateH[nIdx],
+              maxVaporVolume: maxV[nIdx]
+          });
+          nIdx++;
+      }
+  }
+
+  return {
+    timeSteps,
+    nodes,
+    timeHistory,
+    fullHistory
+  };
+}

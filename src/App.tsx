@@ -1,0 +1,1393 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useMemo } from 'react';
+import {
+  Activity,
+  Plus,
+  Trash2,
+  Play,
+  Pause,
+  Square,
+  SkipBack,
+  SkipForward,
+  Settings2,
+  Waves,
+  Info,
+  ArrowRight,
+  Droplets,
+  Zap,
+  TrendingUp,
+  TrendingDown,
+  Clock,
+  Gauge,
+  FileUp,
+  PanelLeftClose,
+  PanelLeftOpen,
+  LayoutDashboard,
+  ZoomIn,
+  ZoomOut
+} from 'lucide-react';
+import Papa from 'papaparse';
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  Legend, 
+  ResponsiveContainer,
+  AreaChart,
+  Area
+} from 'recharts';
+import { motion, AnimatePresence } from 'motion/react';
+import { cn } from './lib/utils';
+import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
+import { runWaterHammerSimulation } from './solver';
+import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
+// ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
+// The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
+// never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
+// whatever the report says. Disabling the run, the modal and the gate screen are D-5c and D-6.
+import { evaluateGate, GateReport } from './gate_checks';
+import { buildProfileView } from './gate_view';
+
+// THERE IS NO DEFAULT PIPELINE PROFILE. The profile is the user's data — it arrives from a CSV or
+// is typed into the table, and this program has no business inventing one (user, 2026-09-12).
+//
+// The seeded 1000 m / 0.5 m / 20 m reach that used to sit here was a fabricated system, and it was
+// load-bearing in a way that is easy to miss: it gave every scenario a plausible-looking starting
+// state, so the app always opened on something that ran. With no profile the gate reports B8 — "the
+// pipe list is empty" — which is correct, is exactly what row 3.11 exists to say, and is a better
+// first screen than a pipeline the user never described.
+const DEFAULT_PIPES: PipeSection[] = [];
+
+const DEFAULT_PUMP: PumpParams = {
+  initialHead: 100,
+  initialFlow: 0.5,
+  tripTime: 2,
+  haltTime: 5,
+  elevation: 10,
+};
+
+// ── Boundary conditions (Row 3.11 Unit C, D-4 — S68) ────────────────────────
+//
+// ONE CONVENTION AT BOTH ENDS, IN EVERY SCENARIO: a gauge PRESSURE at the point,
+// in metres of water column. The datum-referenced head the solver wants is derived
+// here, in the input layer, as `Head = Pressure + Elevation of that point` — the
+// rule `resolveHDown` already applied downstream, now applied everywhere
+// (DECISIONS.md 2026-09-08, ruling R2).
+//
+// This replaces `DEFAULT_RESERVOIR`, a WATER-SURFACE ELEVATION, which made the app
+// ask for the same downstream tank two different ways depending on the run: 30 on a
+// pump trip, 10 on a valve run, for one tank on a pipe end at 20 m. That mix is what
+// the 2026-08-20 instruction ordered removed.
+//
+// UNSUPPLIED MEANS ZERO GAUGE — atmospheric, NOT absolute (ratified 2026-08-20).
+// Zero absolute is a full vacuum ~10.2 m lower, sits below vapour pressure, and
+// would be refused by the initial-condition guard. That rule governs a boundary the
+// FILE does not supply, and the CSV import below honours it: an absent column-I value
+// parses to 0.
+//
+// The SEEDED demo state the app opens with follows the same rule, and both ends are
+// atmospheric. A reservoir open to the air IS 0 gauge at its surface; the driving head
+// of a gravity main comes from its TOPOGRAPHY, not from a pressure at the source.
+//
+//   outlet  the valve scenarios already opened at 0, discharge to open air. Kept. A pump
+//           trip opened at a reservoir head of 30 m over a last node at 20 m, i.e. 10 m
+//           gauge — so its default DOES change, from a 10 m tank to open air, and its
+//           opening result changes with it. One field cannot carry two old defaults, and
+//           0 gauge is the ratified one.
+//   inlet   0, like the outlet.
+//
+// Node 0's ELEVATION is not here, and no number is invented for it. It is PROFILE data —
+// the Y of the first point — so it comes from the file on import, or from the user with
+// the rest of the profile. `PipeSection` carries only `endElevation`, so the pipe list
+// alone cannot express it; that is why it is tracked separately, not why it may be made up.
+//
+// Two earlier attempts at this default were both wrong, and both in the same way:
+// `gravityHead = 43.22` over a flat 20 m line was 23.22 m of water standing on the level —
+// a pressurised feed described as a gravity one; and replacing it with a source seeded at
+// 43.22 m invented a hill to put the reservoir on. The driving head of a gravity main comes
+// from the user's topography or it does not exist.
+const DEFAULT_OUTLET_PRESSURE = 0;   // m gauge at the last node — open to air
+const DEFAULT_INLET_PRESSURE  = 0;   // m gauge at node 0 — open to air
+
+export default function App() {
+  const [pipes, setPipes] = useState<PipeSection[]>(() => {
+    const saved = localStorage.getItem('hg_pipes');
+    return saved ? JSON.parse(saved) : DEFAULT_PIPES;
+  });
+  const [pump, setPump] = useState<PumpParams>(() => {
+    const saved = localStorage.getItem('hg_pump');
+    return saved ? JSON.parse(saved) : DEFAULT_PUMP;
+  });
+  // NOT restored from localStorage, deliberately. The old `hg_reservoir` key holds a
+  // WATER-SURFACE ELEVATION, and this state is a PRESSURE (R2). Reading a stored 30 back
+  // into it would silently turn a tank at 30 m into one at 50 m on a pipe end at 20 m —
+  // the same number meaning a different system. The key is removed on mount instead.
+  const [outletPressure, setOutletPressure] = useState(DEFAULT_OUTLET_PRESSURE);
+  const [results, setResults] = useState<SimulationResults | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+
+    // ── Step 3.7 scenario selector (S58) ──────────────────────────────────────
+  const [scenario, setScenario] = useState<Scenario>('pump-trip');
+  // Valve inputs (both valve scenarios). Defaults = REF-PAR reference closure (S50/S52-ratified):
+  // Kv0 full-precision = (0.5/√30)·11493.9 (display convention "≈1049.3"); parabolic n=2,
+  // t0=2 s, T_close=1 s; H_down=0; no check valve. Exponent 1 gives a linear closure.
+  const [valveKv0, setValveKv0] = useState(1049.2447172847715);
+  const [valveT0, setValveT0] = useState(2.0);
+  const [valveTClose, setValveTClose] = useState(1.0);
+  const [valveExponent, setValveExponent] = useState(2);
+  // Holds the message when the solver refuses a run, so it can be shown on screen (S62).
+  const [simError, setSimError] = useState<string | null>(null);
+  
+  // ── D-5b: the gate's own output ───────────────────────────────────────────────────────────
+  // Read by nothing except the status line beside the Run button, which exists so that "the
+  // engine ran" is an observation and not an assumption. `gateCrash` is separate from `simError`
+  // on purpose: a gate that throws must not be reported as a refused run.
+  const [gateReport, setGateReport] = useState<GateReport | null>(null);
+  const [gateProfile, setGateProfile] = useState<{ nodes: number; reaches: number } | null>(null);
+  const [gateCrash, setGateCrash] = useState<string | null>(null);
+  const [valveCheckValve, setValveCheckValve] = useState(false);
+  // Gravity-fed upstream (gravity-valve only). The pressure at node 0, plus node 0's own
+  // elevation. `inletPressure` replaces the former `gravityHead`, which was a datum head —
+  // one end of the app carrying a head while the other carried a pressure is the datum
+  // asymmetry the physics audit raised twice, and R2 closes it.
+  const [inletPressure, setInletPressure] = useState(DEFAULT_INLET_PRESSURE);
+  // ── Node 0, the SOURCE node (user, 2026-09-12) ──────────────────────────────────────────
+  //
+  // Node 0 is always the source — the pump's check valve on a pumped main, the supply point
+  // on a gravity one — and it is a node like any other, so the user provides it. Its
+  // elevation is PROFILE data, the Y at X = 0. It lives with the profile, not with the
+  // boundaries: a boundary is a pressure, and this is geometry.
+  //
+  // ONE FIELD, replacing two. The build had `gravityElevation` on the valve panel AND
+  // `Pump Elevation` on the pump panel, and both land on the same place — `Z[0]`, via
+  // `pump.elevation` (solver.ts:1480, 1608) or `upstream.elevation` (:2817) depending on
+  // scenario. Two inputs for one physical node is the same defect class as the two boundary
+  // conventions R2 removed: they can be set to disagree, and nothing said which won.
+  const [sourceElevation, setSourceElevation] = useState(0);
+
+
+  // Persistence Effects
+  React.useEffect(() => {
+    localStorage.setItem('hg_pipes', JSON.stringify(pipes));
+  }, [pipes]);
+
+  React.useEffect(() => {
+    localStorage.setItem('hg_pump', JSON.stringify(pump));
+  }, [pump]);
+
+  // The downstream tank is no longer stored, and the old key is actively removed rather than
+  // left to rot: it holds an ELEVATION under a name this app no longer has a field for, and
+  // anything that read it later would read it as a pressure (R2). Runs once.
+  React.useEffect(() => {
+    localStorage.removeItem('hg_reservoir');
+  }, []);
+
+  const [showInputs, setShowInputs] = useState(true);
+  const [activeTab, setActiveTab] = useState<'pressure' | 'vapor' | 'flow'>('pressure');
+
+  // Animation State — time-based for smooth interpolation between frames
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [animTime, setAnimTime] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  // Node selector (for tabbed charts)
+  const [selectedNodeIdx, setSelectedNodeIdx] = useState(0);
+
+  // Tab X-axis zoom level (0 = full range, each tick = 0.8×)
+  const [tabZoomLevel, setTabZoomLevel] = useState(0);
+
+  const totalLength = useMemo(() => pipes.reduce((acc, p) => acc + p.length, 0), [pipes]);
+
+  /**
+   * Celerity (Wave Speed) Calculation:
+   * a = sqrt( (K/rho) / (1 + (K/E)*(D/e)) )
+   * K (Bulk Modulus of Water) = 2.2 GPa
+   * rho (Density of Water) = 1000 kg/m3
+   * E (Young's Modulus) = 200 GPa (Steel), 3 GPa (PVC), etc.
+   * D/e = Diameter / Wall Thickness ratio.
+   */
+  const calculateWaveSpeed = (material: string, diameter: number, wallThickness: number): number => {
+    const K = 2.2e9; 
+    let E = 200e9; 
+    const m = material.toLowerCase();
+    if (m.includes('steel')) E = 200e9;
+    else if (m.includes('pvc')) E = 3e9;
+    else if (m.includes('hdpe')) E = 0.8e9;
+    else if (m.includes('concrete')) E = 30e9;
+    const a = 1483 / Math.sqrt(1 + (K / E) * (diameter / wallThickness));
+    return Number(a.toFixed(2));
+  };
+
+  /**
+   * Friction Factor (Darcy-Weisbach f) from Hazen-Williams C:
+   * Derived by equating HW head loss to DW head loss.
+   */
+  const convertHWToDarcy = (C: number, D: number, Q: number): number => {
+    if (Q <= 0 || D <= 0) return 0.02;
+    const v = Q / (Math.PI * D * D / 4);
+    if (v < 0.001) return 0.02;
+    // According to typical units, 133.2 seems commonly used but may result in v10 error mentioned by user. We'll add the 10 correction factor:
+    const f = (134.2 / (Math.pow(v, 0.148) * Math.pow(C, 1.852) * Math.pow(D, 0.166))) / 10;
+    return Number(f.toFixed(4));
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    Papa.parse(file, {
+      complete: (results) => {
+        const rows = results.data as string[][];
+        if (rows.length < 2) return;
+
+        // Skip header if present (assuming row 0 is header or contains "x")
+        const startRow = rows[0][0].toLowerCase().includes('x') ? 1 : 0;
+        
+        let lastDiam = 0, lastWT = 0, lastMat = 'Steel', lastC = 120, lastQ = 0;
+        const processedPipes: PipeSection[] = [];
+        let initialHead = pump.initialHead;
+        let pFlow = pump.initialFlow;
+
+        // i2 in excel usually refers to row 2, col I (index 8).
+        // If there's a header, Excel Row 2 is data index 1.
+        // If no header, Excel Row 2 is data index 1.
+        let reservoirHeadOffset = 0;
+        const i2Cell = rows[1]?.[8];
+        if (i2Cell) {
+          reservoirHeadOffset = parseFloat(i2Cell) || 0;
+        }
+
+        for (let i = startRow; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row[0] && !row[1]) continue; 
+
+          const x = parseFloat(row[0]);
+          const y = parseFloat(row[1]);
+          if (isNaN(x) || isNaN(y)) continue;
+
+          // Inheritance for columns 2-6
+          if (row[2]) lastDiam = parseFloat(row[2]) / 1000; 
+          if (row[3]) lastWT = parseFloat(row[3]) / 1000; 
+          if (row[4]) lastMat = row[4];
+          if (row[5]) lastC = parseFloat(row[5]);
+          if (row[6]) lastQ = parseFloat(row[6]) / 3600; 
+
+          // Device checks
+          if (row[7]?.toLowerCase() === 'pump') {
+            // The pump's elevation is NOT read here — node 0's elevation is the profile's first
+            // point, read once below. The pump is at X = 0, so this row IS that point.
+            pFlow = Number(lastQ.toFixed(4));
+            if (row[8]) initialHead = Number((y + parseFloat(row[8])).toFixed(2));
+          }
+
+          if (i + 1 < rows.length) {
+            const nextRow = rows[i+1];
+            const nextX = parseFloat(nextRow[0]);
+            const nextY = parseFloat(nextRow[1]);
+            if (!isNaN(nextX) && !isNaN(nextY)) {
+              const length = Math.sqrt(Math.pow(nextX - x, 2) + Math.pow(nextY - y, 2));
+              if (length > 0) {
+                processedPipes.push({
+                  id: Math.random().toString(36).substr(2, 9),
+                  length: Number(length.toFixed(2)),
+                  diameter: Number((lastDiam || 0.5).toFixed(4)),
+                  waveSpeed: calculateWaveSpeed(lastMat, lastDiam || 0.5, lastWT || 0.01),
+                  frictionFactor: convertHWToDarcy(lastC, lastDiam || 0.5, lastQ),
+                  endElevation: Number(nextY.toFixed(2))
+                });
+              }
+            }
+          }
+        }
+
+        if (processedPipes.length > 0) {
+          setPipes(processedPipes);
+          // `elevation` is no longer set from the pump-tagged row. Node 0's elevation comes from
+          // the profile's FIRST POINT, below, and from there alone — the pump sits at X = 0, so
+          // the two coincide, and reading it twice is how they would come to disagree.
+          setPump(prev => ({ ...prev, initialFlow: pFlow, initialHead: initialHead }));
+          // R2: the column-I value IS the water level ABOVE the node it sits at, which is the
+          // gauge pressure at that node. It is taken through unchanged. The elevation is no
+          // longer added here — the input layer adds it once, at dispatch, for every scenario.
+          // Adding it here as well was the second half of the mixed convention.
+          setOutletPressure(Number(reservoirHeadOffset.toFixed(2)));
+          // Node 0 is the profile's first point, for EVERY scenario — not a gravity-only input.
+          // Its elevation is the Y there, and the column-I offset is the pressure there.
+          const firstElev = parseFloat(rows[startRow]?.[1]);
+          if (!isNaN(firstElev)) {
+            setSourceElevation(Number(firstElev.toFixed(2)));
+            setInletPressure(Number(reservoirHeadOffset.toFixed(2)));
+          }
+        }
+      }
+    });
+  };
+
+  const handleAddPipe = () => {
+    const lastPipe = pipes[pipes.length - 1];
+    const newPipe: PipeSection = {
+      id: Math.random().toString(36).substr(2, 9),
+      length: 500,
+      diameter: 0.5,
+      waveSpeed: 1000,
+      frictionFactor: 0.02,
+      endElevation: lastPipe ? lastPipe.endElevation + 10 : 20,
+    };
+    setPipes([...pipes, newPipe]);
+  };
+
+  const handleRemovePipe = (id: string) => {
+    if (pipes.length > 1) {
+      setPipes(pipes.filter(p => p.id !== id));
+    }
+  };
+
+  const handleUpdatePipe = (id: string, updates: Partial<PipeSection>) => {
+    setPipes(pipes.map(p => p.id === id ? { ...p, ...updates } : p));
+  };
+
+  // ── D-5b: the solver's inputs, assembled in ONE place ───────────────────────────────────────
+  // Lifted verbatim out of `handleRunSimulation` so the gate and the run read the same expression.
+  // Two assemblies of one set of inputs is a silent-disagreement defect: they drift, and the gate
+  // then passes a system the run never sees. Nothing inside this function changed when it moved.
+  const buildDispatchInputs = (): DispatchInputs => {
+    // ── The boundary conversion, in ONE place (R2) ──────────────────────────────────
+    // Every end of every scenario is entered as a gauge pressure and becomes a
+    // datum-referenced head here: `Head = Pressure + Elevation of that point`.
+    //
+    //   outlet, pump-trip     -> reservoir.head            = p + Z(last node)
+    //   outlet, valve runs    -> valve.downstreamPressure  = p   (converted in
+    //                            scenario_dispatch's resolveHDown, by the same rule —
+    //                            passed as a pressure so the unit boundary is kept)
+    //   inlet, gravity        -> gravity.head              = p + Z(node 0)
+    //
+    // The last node's elevation is the last pipe's `endElevation`, which is the node
+    // `CALC_BC_VALVE` / the terminal reservoir is dispatched at — the same elevation
+    // `resolveHDown` uses, so the two ends cannot drift apart.
+    const lastEndElevation = pipes.length > 0 ? pipes[pipes.length - 1].endElevation : 0;
+    const outletReservoir: ReservoirParams = { head: outletPressure + lastEndElevation };
+
+    // Node 0's elevation reaches the solver through whichever field that scenario uses —
+    // `pump.elevation` on a pumped main, `upstream.elevation` on a gravity one. Both are
+    // `Z[0]`. Sourced from ONE value so the two can never be set to disagree.
+    return {
+      pipes, pump: { ...pump, elevation: sourceElevation }, reservoir: outletReservoir,
+      valve: scenario === 'pump-trip' ? undefined : {
+        coefficient: { Kv0: valveKv0 },
+        law: { law: 'parabolic', t0: valveT0, T_close: valveTClose, n: valveExponent },
+        downstreamPressure: outletPressure,
+        check_valve: valveCheckValve,
+      },
+      gravity: scenario === 'gravity-valve'
+        ? { head: inletPressure + sourceElevation, elevation: sourceElevation }
+        : undefined,
+    };
+  };
+
+  const handleRunSimulation = () => {
+    setIsSimulating(true);
+    setIsAnimating(false);
+    setAnimTime(0);
+    setTabZoomLevel(0);
+    setTimeout(() => {
+      try {
+        const inputs = buildDispatchInputs();
+
+        // ── D-5b: the gate runs, and gates NOTHING ──────────────────────────────────────
+        // First execution of `evaluateGate` outside a test harness. It is deliberately
+        // isolated from the run: its own try/catch, and the run below proceeds whatever
+        // it reports. A gate that throws on a real profile shows up beside the button
+        // instead of taking a working run down with it.
+        try {
+          const report = evaluateGate(scenario, inputs);
+          const view = report.steady ? buildProfileView(report.steady) : null;
+          setGateReport(report);
+          setGateProfile(view ? { nodes: view.nodes.length, reaches: view.reaches.length } : null);
+          setGateCrash(null);
+        } catch (gateError) {
+          console.error("Gate evaluation failed", gateError);
+          setGateReport(null);
+          setGateProfile(null);
+          setGateCrash(gateError instanceof Error ? gateError.message : String(gateError));
+        }
+
+        const res = dispatchSimulation(scenario, inputs);
+
+        setResults(res);
+        setSimError(null);
+        setSelectedNodeIdx(0);
+      } catch (error) {
+        console.error("Simulation failed", error);
+        setSimError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 100);
+  };
+
+  // Derive simulation time bounds
+  const simTMax = useMemo(() => {
+    if (!results || results.fullHistory.length === 0) return 0;
+    return results.fullHistory[results.fullHistory.length - 1].time;
+  }, [results]);
+
+  // Smooth animation loop — advances sim-time continuously; chart interpolates between surrounding frames
+  React.useEffect(() => {
+    if (!isAnimating || !results || results.fullHistory.length <= 1) return;
+
+    let raf: number;
+    let last = performance.now();
+
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      setAnimTime(prev => {
+        const next = prev + dt * playbackSpeed;
+        if (next >= simTMax) {
+          setIsAnimating(false);
+          return simTMax;
+        }
+        return next;
+      });
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isAnimating, results, playbackSpeed, simTMax]);
+
+  // Current frame index derived from animTime (largest frame with time <= animTime)
+  const currentFrame = useMemo(() => {
+    if (!results || results.fullHistory.length === 0) return 0;
+    const fh = results.fullHistory;
+    let lo = 0, hi = fh.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (fh[mid].time <= animTime) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }, [results, animTime]);
+
+  // Interpolated HGL at animTime for smooth playback
+  const animatedChartData = useMemo(() => {
+    if (!results || results.fullHistory.length === 0) return [];
+    const fh = results.fullHistory;
+    const a = currentFrame;
+    const b = Math.min(a + 1, fh.length - 1);
+    const tA = fh[a].time;
+    const tB = fh[b].time;
+    const alpha = tB === tA ? 0 : Math.max(0, Math.min(1, (animTime - tA) / (tB - tA)));
+    return results.nodes.map((node, i) => ({
+      ...node,
+      currentHead: fh[a].heads[i] * (1 - alpha) + fh[b].heads[i] * alpha
+    }));
+  }, [results, currentFrame, animTime]);
+
+  const yAxisDomain = useMemo(() => {
+    if (!results) return ['auto', 'auto'] as [any, any];
+    const minYValue = Math.min(...results.nodes.map(n => Math.min(n.elevation, n.minHead)));
+    const maxHead = Math.max(...results.nodes.map(n => n.maxHead));
+    const yMin = Math.round((minYValue - 15) / 5) * 5;
+    const yMax = Math.round(maxHead + 10);
+    return [yMin, yMax] as [number, number];
+  }, [results]);
+
+ // Selectable nodes: upstream boundary + all pipe-to-pipe junction nodes
+  const selectableNodes = useMemo(() => {
+    if (!results) return [] as { idx: number; label: string; x: number }[];
+    const arr: { idx: number; label: string; x: number }[] = [
+      { idx: 0, label: scenario === 'gravity-valve' ? 'Upstream Reservoir' : 'Check Valve (Pump Discharge)', x: 0 }
+    ];
+    let cumL = 0;
+    for (let pi = 0; pi < pipes.length - 1; pi++) {
+      cumL += pipes[pi].length;
+      let best = 0, bestDiff = Infinity;
+      for (let i = 0; i < results.nodes.length; i++) {
+        const d = Math.abs(results.nodes[i].x - cumL);
+        if (d < bestDiff) { bestDiff = d; best = i; }
+      }
+      arr.push({ idx: best, label: `Junction ${pi + 1}–${pi + 2} (x=${cumL.toFixed(1)} m)`, x: cumL });
+    }
+    return arr;
+  }, [results, pipes, scenario]);
+
+  // Clamp selection if pipe count changes
+  React.useEffect(() => {
+    if (selectableNodes.length === 0) return;
+    if (!selectableNodes.some(n => n.idx === selectedNodeIdx)) {
+      setSelectedNodeIdx(selectableNodes[0].idx);
+    }
+  }, [selectableNodes, selectedNodeIdx]);
+
+  // Per-node time history for the tabbed charts (driven by node selector).
+  // Flow = Q_out at the selected node = flow in the pipe immediately downstream.
+  const selectedTimeHistory = useMemo(() => {
+    if (!results || !results.nodes[selectedNodeIdx]) return [];
+    const node = results.nodes[selectedNodeIdx];
+    const elev = node.elevation;
+    return results.fullHistory.map(f => ({
+      time: f.time,
+      head: f.heads[selectedNodeIdx],
+      pressure: f.heads[selectedNodeIdx] - elev,
+      flow: f.flows ? f.flows[selectedNodeIdx] : 0,
+      vaporVolume: f.vapors ? f.vapors[selectedNodeIdx] : 0
+    }));
+  }, [results, selectedNodeIdx]);
+
+  // Effective t_max for tab charts given current zoom level
+  const effectiveTabTMax = useMemo(() => {
+    if (simTMax <= 0) return 0;
+    return simTMax * Math.pow(0.8, tabZoomLevel);
+  }, [simTMax, tabZoomLevel]);
+
+  // Slice data to visible time window
+  const zoomedTabData = useMemo(
+    () => selectedTimeHistory.filter(d => d.time <= effectiveTabTMax + 1e-9),
+    [selectedTimeHistory, effectiveTabTMax]
+  );
+
+  // Reset zoom when node or tab changes (keeps UX predictable)
+  React.useEffect(() => { setTabZoomLevel(0); }, [selectedNodeIdx, activeTab]);
+
+  // Envelope-chart tooltip: distance with 1 decimal; all series except Pipeline show pressure (head − elevation)
+  const envelopeTooltipFormatter = (value: any, name: string, props: any): [string, string] => {
+    if (typeof value !== 'number') return [String(value), name];
+    if (name === 'Pipeline') return [value.toFixed(2) + ' m', 'Elevation'];
+    const elev = props?.payload?.elevation ?? 0;
+    return [(value - elev).toFixed(2) + ' m', name + ' (Pressure)'];
+  };
+  const envelopeLabelFormatter = (label: any) => {
+    const n = typeof label === 'number' ? label : parseFloat(label);
+    return `Distance: ${isFinite(n) ? n.toFixed(1) : label} m`;
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
+              <Waves size={24} />
+            </div>
+            <div>
+              <h1 className="font-bold text-lg tracking-tight">HydroGuard</h1>
+              <p className="text-xs text-slate-500 font-medium">Water Transient Analyzer</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setShowInputs(!showInputs)}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"
+            >
+              {showInputs ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+              {showInputs ? 'Hide Input Data' : 'Expand Input Data'}
+            </button>
+            <div className="w-px h-6 bg-slate-200 mx-2" />
+            <button
+              onClick={() => {
+                localStorage.clear();
+                window.location.reload();
+              }}
+
+              className="text-xs font-bold text-slate-400 hover:text-red-500 transition-colors uppercase tracking-wider"
+            >
+              Reset Data
+            {/* ── D-5b: the gate's verdict, stated but not enforced ──────────────────────
+                This step's only claim is that the engine runs on real input, so it has to
+                say so — "the app still works" is true whether it ran or not. It blocks
+                nothing: the Run button beside it is untouched. D-5c does the blocking. */}
+            {gateCrash ? (
+              <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate" title={gateCrash}>
+                Gate could not run
+              </span>
+            ) : gateReport ? (
+              <span
+                className="text-xs text-slate-500 whitespace-nowrap"
+                title={
+                  (gateReport.inputBlocked
+                    ? 'Stopped at the input checks, so the steady state was never computed.'
+                    : gateProfile
+                      ? `Steady state computed: ${gateProfile.nodes} nodes, ${gateProfile.reaches} reaches.`
+                      : 'No steady state was returned.')
+                  + (gateReport.reContractBlocked ? ' Reynolds contract reported.' : '')
+                  + (gateReport.stateError ? ` State phase threw: ${gateReport.stateError}` : '')
+                  + ' Nothing is blocked by this yet.'
+                }
+              >
+                <span className="font-bold text-slate-600">Gate</span>
+                {` — ${gateReport.blocking.length} blocking, ${gateReport.advisory.length} advisory`}
+                {gateProfile ? ` · ${gateProfile.nodes} nodes` : ''}
+              </span>
+            ) : null}
+            </button>
+            <button
+              onClick={handleRunSimulation}
+              disabled={isSimulating}
+              className={cn(
+                "flex items-center gap-2 px-6 py-2.5 rounded-full font-semibold transition-all shadow-md",
+                isSimulating 
+                  ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
+                  : "bg-blue-600 text-white hover:bg-blue-700 active:scale-95 hover:shadow-blue-200"
+              )}
+            >
+            {isSimulating ? (
+              <Activity className="animate-spin" size={18} />
+            ) : (
+              <Play size={18} fill="currentColor" />
+            )}
+            {isSimulating ? "Analyzing..." : "Run Simulation"}
+          </button>
+          </div>
+        </div>
+      </header>
+
+      {simError && (
+        <div className="mx-6 mt-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200">
+          <p className="text-sm font-bold text-red-700">
+            This system cannot be simulated as entered — the run was refused.
+          </p>
+          <p className="text-xs text-red-600 mt-1 leading-snug">{simError}</p>
+          <p className="text-[11px] text-red-400 mt-2 leading-snug">
+            The chart below still shows your previous run, not this one.
+          </p>
+        </div>
+      )}
+
+      <main className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-8">
+        {/* Sidebar - Inputs */}
+        {showInputs && (
+          <div className="w-80 flex-shrink-0 space-y-6">
+            {/* CSV Upload */}
+          <section className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-4 text-emerald-600">
+              <FileUp size={20} />
+              <h2 className="font-bold text-sm uppercase tracking-wider">Import Data</h2>
+            </div>
+            <div className="relative">
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleFileUpload}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+              />
+              <div className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center hover:border-emerald-300 hover:bg-emerald-50 transition-all group">
+                <FileUp size={24} className="mx-auto mb-2 text-slate-300 group-hover:text-emerald-500 transition-colors" />
+                <p className="text-[10px] font-bold text-slate-400 group-hover:text-emerald-600 uppercase">Click to upload CSV</p>
+                <p className="text-[8px] text-slate-300 mt-1 uppercase">x, y, diameter, wt, mat, C, Q...</p>
+              </div>
+            </div>
+          </section>
+
+          {/* Calculation Basis Info */}
+          <section className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-3 text-slate-600">
+              <Info size={18} />
+              <h2 className="font-bold text-xs uppercase tracking-wider">Hydraulic Models</h2>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Celerity (a)</p>
+                <p className="text-[10px] text-slate-500 leading-relaxed italic">
+                  Elastic wave theory: <br/> 
+                  a = 1483 / √(1 + (K/E)·(D/e))
+                </p>
+              </div>
+              <div className="pt-2 border-t border-slate-100">
+                <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Friction (f)</p>
+                <p className="text-[10px] text-slate-500 leading-relaxed italic">
+                  Hazen-Williams conversion: <br/>
+                  f = 134.2 / (v⁰.¹⁴⁸·C¹·⁸⁵²·D⁰·¹⁶⁶)
+                </p>
+              </div>
+            </div>
+          </section>
+
+          {/* Pipe Sections */}
+          <section className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-blue-600">
+                <Settings2 size={20} />
+                <h2 className="font-bold">Pipe Network</h2>
+              </div>
+              <button
+                onClick={handleAddPipe}
+                className="p-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors"
+                title="Add Pipe Section"
+              >
+                <Plus size={18} />
+              </button>
+            </div>
+            
+              {/* Node 0 — the source, and the profile's first point. A node like any other, so
+                the user provides it (user, 2026-09-12). It is the pump's check valve on a
+                pumped main and the supply point on a gravity one; either way it is X = 0, and
+                its elevation is the Y there. Shown above the reaches because that is where it
+                is on the line. */}
+            <div className="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+                    Node 0 — Source
+                  </div>
+                  <div className="text-[10px] text-slate-400 leading-snug mt-0.5">
+                    {scenario === 'gravity-valve' ? 'Supply point' : 'Pump check valve'}, at X = 0
+                  </div>
+                </div>
+                <div className="space-y-1 w-32 shrink-0">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Elevation (m)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={sourceElevation}
+                    onChange={e => setSourceElevation(Number(Number(e.target.value).toFixed(2)))}
+                    className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+              <AnimatePresence initial={false}>
+                {pipes.map((pipe, index) => (
+                  <motion.div
+                    key={pipe.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className="p-4 bg-slate-50 rounded-xl border border-slate-200 relative group"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Section {index + 1}</span>
+                      <button
+                        onClick={() => handleRemovePipe(pipe.id)}
+                        className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Length (m)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={pipe.length}
+                          onChange={e => handleUpdatePipe(pipe.id, { length: Number(Number(e.target.value).toFixed(2)) })}
+                          className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Diameter (m)</label>
+                        <input
+                          type="number"
+                          step="0.001"
+                          value={pipe.diameter}
+                          onChange={e => handleUpdatePipe(pipe.id, { diameter: Number(Number(e.target.value).toFixed(4)) })}
+                          className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Wave Speed (m/s)</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={pipe.waveSpeed}
+                          onChange={e => handleUpdatePipe(pipe.id, { waveSpeed: Number(Number(e.target.value).toFixed(2)) })}
+                          className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Friction (f)</label>
+                        <input
+                          type="number"
+                          step="0.0001"
+                          value={pipe.frictionFactor}
+                          onChange={e => handleUpdatePipe(pipe.id, { frictionFactor: Number(Number(e.target.value).toFixed(4)) })}
+                          className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div className="space-y-1 col-span-2">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">End Elevation (m)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={pipe.endElevation}
+                          onChange={e => handleUpdatePipe(pipe.id, { endElevation: Number(Number(e.target.value).toFixed(2)) })}
+                          className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          </section>
+
+          {/* Scenario Selector — Step 3.7 (S58) */}
+          <section className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-4 text-blue-600">
+              <Settings2 size={18} />
+              <h2 className="font-bold text-sm uppercase tracking-wider">Scenario</h2>
+            </div>
+            <div className="space-y-3">
+              <select
+                value={scenario}
+                onChange={e => setScenario(e.target.value as Scenario)}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+              >
+                <option value="pump-trip">Pump trip only (default)</option>
+                <option value="pump-valve">Pump-fed + valve closure</option>
+                <option value="gravity-valve">Gravity-fed + valve closure</option>
+              </select>
+              {scenario !== 'pump-trip' && (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Valve Kv (m³/h)</label>
+                      <input type="number" step="0.1" value={valveKv0}
+                        onChange={e => setValveKv0(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Start (s)</label>
+                      <input type="number" step="0.1" value={valveT0}
+                        onChange={e => setValveT0(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Time (s)</label>
+                      <input type="number" step="0.1" value={valveTClose}
+                        onChange={e => setValveTClose(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Exponent</label>
+                      <input type="number" step="1" min="1" value={valveExponent}
+                        onChange={e => setValveExponent(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    Valve scenarios ignore the pump Trip/Halt times — the valve closure is the
+                    only transient event. The gravity-fed scenario ignores the whole Pump &amp;
+                    Trip panel (the reservoir replaces the pump). Both ends of the system are
+                    entered in the Boundary Conditions panel.
+                  </p>
+                </>
+              )}
+            </div>
+          </section>
+
+          {/* Boundary Conditions (Row 3.11 Unit C, D-4 — S68) ─────────────────────────────
+              REPLACES the "Downstream Reservoir / Water Level Elevation" panel, which was
+              drawn on EVERY scenario but read only by a pump trip. On a valve run it sat
+              there, editable and inert, with the only warning a line of grey text at the
+              bottom of a different panel — and a boundary typed into it went nowhere. That
+              is the S64 blocker's actual surface, and removing the box is the fix.
+
+              Both ends now live here, both are gauge pressures, and each is shown only on
+              the scenarios that read it. Nothing on this screen is editable and ignored. */}
+          <section className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-4 text-blue-600">
+              <Droplets size={20} />
+              <h2 className="font-bold">Boundary Conditions</h2>
+            </div>
+            <div className="space-y-4">
+              {scenario === 'gravity-valve' && (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-500 uppercase">Pressure at X = 0 (m)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={inletPressure}
+                      onChange={e => setInletPressure(Number(Number(e.target.value).toFixed(2)))}
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                    />
+                  </div>
+                </>
+              )}
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase">
+                  Pressure at {scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"} (m)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={outletPressure}
+                  onChange={e => setOutletPressure(Number(Number(e.target.value).toFixed(2)))}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 leading-snug">
+                Pressures are gauge, in metres of water column — 0 discharges to open air. Each
+                is the pressure <em>at</em> its point; the height above sea level is taken from
+                the pipe profile automatically and added for you.
+              </p>
+            </div>
+          </section>
+
+          {/* Pump Config Left Pane now moving to sidebar */}
+          {scenario !== 'gravity-valve' && (
+          <section className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-5 text-blue-600">
+              <Zap size={18} />
+              <h2 className="font-bold text-sm uppercase tracking-wider">{scenario === 'pump-trip' ? 'Pump & Trip' : 'Pump'}</h2>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Initial Flow (m³/s)</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={pump.initialFlow}
+                    onChange={e => setPump({ ...pump, initialFlow: Number(Number(e.target.value).toFixed(4)) })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  />
+                </div>
+                {scenario === 'pump-trip' && (
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trip Time (s)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={pump.tripTime}
+                    onChange={e => setPump({ ...pump, tripTime: Number(Number(e.target.value).toFixed(2)) })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  />
+                </div>
+                )}
+              </div>
+              {scenario === 'pump-trip' && (
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Halt Time (s)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={pump.haltTime}
+                  onChange={e => setPump({ ...pump, haltTime: Number(Number(e.target.value).toFixed(2)) })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                />
+              </div>
+              )}
+              {/* "Pump Elevation" was here. It IS node 0's elevation — the pump sits at X = 0 —
+                  and so was the gravity panel's "Elevation at X = 0". Both are now the one
+                  Source Node field in the Pipe Network panel, where profile data belongs. */}
+            </div>
+          </section>
+          )}
+        </div>
+        )}
+
+        {/* Main Content - Results */}
+        <div className="flex-1 min-w-0 space-y-8">
+              {!results ? (
+                <div className="h-full min-h-[600px] flex flex-col items-center justify-center text-center p-12 bg-white rounded-3xl border-2 border-dashed border-slate-200">
+                  <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center text-blue-500 mb-6">
+                    <Info size={40} />
+                  </div>
+                  <h3 className="text-xl font-bold mb-2">Ready to Analyze</h3>
+                  <p className="text-slate-500 max-w-md mx-auto mb-8">
+                    Configure your pump, pipe sections, and reservoir parameters, then run the simulation to see the transient pressure response.
+                  </p>
+                  <div className="flex items-center gap-8 text-sm font-medium text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-blue-500" />
+                      {scenario === 'pump-trip'
+                        ? `Pump Trip @ ${pump.tripTime}s`
+                        : `Valve Closure Start @ ${valveT0}s`}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-green-500" />
+                      MOC Solver
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-orange-500" />
+                      Pressure Envelopes
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="space-y-8"
+                >
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-4">
+                      <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center text-red-600">
+                        <TrendingUp size={20} />
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Head</p>
+                        <p className="text-xl font-black text-slate-900">
+                          {Math.max(...results.nodes.map(n => n.maxHead)).toFixed(2)} <span className="text-xs font-normal text-slate-500">m</span>
+                        </p>
+                      </div>
+                    </div>
+                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-4">
+                      <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600">
+                        <TrendingDown size={20} />
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Min Head</p>
+                        <p className="text-xl font-black text-slate-900">
+                          {Math.min(...results.nodes.map(n => n.minHead)).toFixed(2)} <span className="text-xs font-normal text-slate-500">m</span>
+                        </p>
+                      </div>
+                    </div>
+                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-4">
+                      <div className="w-10 h-10 bg-orange-50 rounded-xl flex items-center justify-center text-orange-600">
+                        <Droplets size={20} />
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Vapor</p>
+                        <p className="text-xl font-black text-slate-900">
+                          {(Math.max(...results.nodes.map(n => n.maxVaporVolume)) * 1000).toFixed(2)} <span className="text-xs font-normal text-slate-500">L</span>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Pressure Envelope & Animation */}
+                  <section className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-6">
+                      <div>
+                        <h3 className="text-lg font-bold">Pressure Envelope</h3>
+                        <p className="text-sm text-slate-500">HGL profile along the pipeline</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-6">
+                      {/* Playback Controls Column */}
+                      {results && (
+                        <div className="flex flex-col items-center gap-4 pt-2">
+                          {/* Timer above buttons - small and technical */}
+                          <div className="text-center mb-1">
+                            <p className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Time</p>
+                            <p className="text-xs font-mono font-bold text-blue-600">
+                              {animTime.toFixed(2)}
+                            </p>
+                          </div>
+
+                          <div className="flex flex-col gap-2">
+                            <button
+                              onClick={() => {
+                                const fh = results.fullHistory;
+                                const next = Math.min(fh.length - 1, currentFrame + 5);
+                                setAnimTime(fh[next].time);
+                                setIsAnimating(false);
+                              }}
+                              className="p-2.5 bg-white rounded-xl hover:bg-blue-50 text-slate-600 border border-slate-200 hover:border-blue-200 hover:text-blue-600 transition-all shadow-sm group"
+                              title="Step Forward"
+                            >
+                              <SkipForward size={18} fill="currentColor" className="group-hover:scale-110 transition-transform" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                const fh = results.fullHistory;
+                                const prev = Math.max(0, currentFrame - 5);
+                                setAnimTime(fh[prev].time);
+                                setIsAnimating(false);
+                              }}
+                              className="p-2.5 bg-white rounded-xl hover:bg-blue-50 text-slate-600 border border-slate-200 hover:border-blue-200 hover:text-blue-600 transition-all shadow-sm group"
+                              title="Step Backward"
+                            >
+                              <SkipBack size={18} fill="currentColor" className="group-hover:scale-110 transition-transform" />
+                            </button>
+                          </div>
+
+                          <div className="h-px w-8 bg-slate-100" />
+
+                          <button
+                            onClick={() => {
+                              // If at end, rewind before playing
+                              if (animTime >= simTMax) setAnimTime(0);
+                              setIsAnimating(!isAnimating);
+                            }}
+                            className={cn(
+                              "w-12 h-12 rounded-full flex items-center justify-center transition-all shadow-lg active:scale-95",
+                              isAnimating
+                                ? "bg-amber-500 text-white hover:bg-amber-600 shadow-amber-100"
+                                : "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-100"
+                            )}
+                          >
+                            {isAnimating ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
+                          </button>
+
+                          <button
+                            onClick={() => { setIsAnimating(false); setAnimTime(0); }}
+                            className="p-2 text-slate-300 hover:text-slate-500 transition-colors"
+                            title="Reset"
+                          >
+                            <Square size={14} fill="currentColor" />
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="h-[400px] flex-1 min-w-0 overflow-hidden">
+                        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                          <LineChart data={animatedChartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                            <XAxis 
+                              dataKey="x" 
+                              label={{ value: 'Distance (m)', position: 'insideBottom', offset: -10, fontSize: 11, fontWeight: 600 }}
+                              tick={{ fontSize: 10 }}
+                              tickFormatter={(val) => Math.round(val).toString()}
+                            />
+                            <YAxis 
+                              label={{ value: 'Head (m)', angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
+                              tick={{ fontSize: 10 }}
+                              tickFormatter={(val) => Math.round(val).toString()}
+                              domain={yAxisDomain}
+                            />
+                            <Tooltip
+                              contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                              labelFormatter={envelopeLabelFormatter}
+                              formatter={envelopeTooltipFormatter}
+                            />
+                            <Legend
+                              verticalAlign="bottom" 
+                              align="center" 
+                              iconType="circle" 
+                              wrapperStyle={{ paddingTop: '20px', fontSize: '10px' }} 
+                            />
+                            <Line name="Max Head" type="linear" dataKey="maxHead" stroke="#ef4444" strokeWidth={1} dot={false} strokeDasharray="5 5" isAnimationActive={false} />
+                            <Line name="Min Head" type="linear" dataKey="minHead" stroke="#3b82f6" strokeWidth={1} dot={false} strokeDasharray="5 5" isAnimationActive={false} />
+                            <Line name="Steady-State" type="linear" dataKey="steadyHead" stroke="#94a3b8" strokeWidth={1} dot={false} strokeDasharray="3 3" isAnimationActive={false} />
+                            <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
+                            <Line name="Current HGL" type="linear" dataKey="currentHead" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 2 }} isAnimationActive={false} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div className="mt-6 relative h-1.5 bg-slate-100 rounded-full overflow-hidden cursor-pointer group"
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const x = e.clientX - rect.left;
+                        const percent = Math.max(0, Math.min(1, x / rect.width));
+                        setAnimTime(percent * simTMax);
+                        setIsAnimating(false);
+                      }}
+                    >
+                      <div
+                        className="absolute top-0 left-0 h-full bg-blue-600"
+                        style={{ width: `${simTMax > 0 ? (animTime / simTMax) * 100 : 0}%` }}
+                      />
+                    </div>
+                  </section>
+                  
+                  {/* Reorganized Charts with Tabs */}
+                  <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div className="flex border-b border-slate-200 items-center">
+                      <div className="flex overflow-x-auto custom-scrollbar">
+                        <button
+                          onClick={() => setActiveTab('pressure')}
+                          className={cn("px-6 py-4 font-bold text-sm transition-colors border-b-2 whitespace-nowrap outline-none", activeTab === 'pressure' ? "text-blue-600 border-blue-600 bg-blue-50/50" : "text-slate-500 border-transparent hover:text-slate-700 hover:bg-slate-50")}
+                        >
+                          Transient Pressure
+                        </button>
+                        <button
+                          onClick={() => setActiveTab('vapor')}
+                          className={cn("px-6 py-4 font-bold text-sm transition-colors border-b-2 whitespace-nowrap outline-none", activeTab === 'vapor' ? "text-blue-600 border-blue-600 bg-blue-50/50" : "text-slate-500 border-transparent hover:text-slate-700 hover:bg-slate-50")}
+                        >
+                          Vapor Volume
+                        </button>
+                        <button
+                          onClick={() => setActiveTab('flow')}
+                          className={cn("px-6 py-4 font-bold text-sm transition-colors border-b-2 whitespace-nowrap outline-none", activeTab === 'flow' ? "text-blue-600 border-blue-600 bg-blue-50/50" : "text-slate-500 border-transparent hover:text-slate-700 hover:bg-slate-50")}
+                        >
+                          Flow Rate
+                        </button>
+                      </div>
+
+                      <div className="ml-auto flex items-center gap-3 pr-4">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Node</label>
+                        <select
+                          value={selectedNodeIdx}
+                          onChange={e => setSelectedNodeIdx(Number(e.target.value))}
+                          className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-xs font-semibold text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                        >
+                          {selectableNodes.map(n => (
+                            <option key={n.idx} value={n.idx}>{n.label}</option>
+                          ))}
+                        </select>
+                        <div className="flex items-center gap-1 border border-slate-200 rounded-md overflow-hidden">
+                          <button
+                            onClick={() => setTabZoomLevel(z => z + 1)}
+                            disabled={effectiveTabTMax <= 0.2}
+                            title="Zoom In (shrink x-range by 20%)"
+                            className="p-1.5 bg-white hover:bg-blue-50 text-slate-600 hover:text-blue-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <ZoomIn size={14} />
+                          </button>
+                          <button
+                            onClick={() => setTabZoomLevel(z => Math.max(0, z - 1))}
+                            disabled={tabZoomLevel === 0}
+                            title="Zoom Out"
+                            className="p-1.5 bg-white hover:bg-blue-50 text-slate-600 hover:text-blue-600 transition-colors border-l border-slate-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <ZoomOut size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-6">
+                      {activeTab === 'pressure' && (
+                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+                          <div className="mb-6">
+                            <h3 className="text-base font-bold text-blue-600">Transient Pressure</h3>
+                            <p className="text-xs text-slate-500">P vs time at {selectableNodes.find(n => n.idx === selectedNodeIdx)?.label ?? 'selected node'}</p>
+                          </div>
+                          <div className="h-[300px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={zoomedTabData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis
+                                  dataKey="time"
+                                  type="number"
+                                  domain={[0, effectiveTabTMax]}
+                                  allowDataOverflow
+                                  tick={{ fontSize: 10 }}
+                                  tickFormatter={(val) => Math.round(val).toString()}
+                                />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Math.round(val).toString()} />
+                                <Tooltip
+                                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                                  labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
+                                  formatter={(v: any) => [Number(v).toFixed(2) + ' m', 'Pressure']}
+                                />
+                                <Line type="linear" dataKey="pressure" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
+                      {activeTab === 'vapor' && (
+                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+                          <div className="mb-6">
+                            <h3 className="text-base font-bold text-orange-600">Vapor Volume</h3>
+                            <p className="text-xs text-slate-500">Cavity volume at {selectableNodes.find(n => n.idx === selectedNodeIdx)?.label ?? 'selected node'} (Liters)</p>
+                          </div>
+                          <div className="h-[300px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={zoomedTabData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                                <defs>
+                                  <linearGradient id="colorVapor" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#f97316" stopOpacity={0.3}/>
+                                    <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis
+                                  dataKey="time"
+                                  type="number"
+                                  domain={[0, effectiveTabTMax]}
+                                  allowDataOverflow
+                                  tick={{ fontSize: 10 }}
+                                  tickFormatter={(val) => Math.round(val).toString()}
+                                />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Number((val * 1000).toPrecision(3)).toString()} />
+                                <Tooltip
+                                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                                  labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
+                                  formatter={(v: any) => [(Number(v) * 1000).toFixed(2) + ' L', 'Vapor Volume']}
+                                />
+                                <Area type="linear" dataKey="vaporVolume" stroke="#f97316" fillOpacity={1} fill="url(#colorVapor)" strokeWidth={2} isAnimationActive={false} />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
+                      {activeTab === 'flow' && (
+                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+                          <div className="mb-6">
+                            <h3 className="text-base font-bold text-indigo-600">Flow Rate</h3>
+                            <p className="text-xs text-slate-500">Q in downstream pipe of {selectableNodes.find(n => n.idx === selectedNodeIdx)?.label ?? 'selected node'}</p>
+                          </div>
+                          <div className="h-[300px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={zoomedTabData} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis
+                                  dataKey="time"
+                                  type="number"
+                                  domain={[0, effectiveTabTMax]}
+                                  allowDataOverflow
+                                  tick={{ fontSize: 10 }}
+                                  tickFormatter={(val) => Math.round(val).toString()}
+                                />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => val.toFixed(2)} />
+                                <Tooltip
+                                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                                  labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
+                                  formatter={(v: any) => [Number(v).toFixed(4) + ' m³/s', 'Flow']}
+                                />
+                                <Line type="linear" dataKey="flow" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-slate-200 py-12 mt-12">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex items-center gap-2 opacity-50">
+            <Waves size={20} />
+            <span className="font-bold tracking-tight">HydroGuard</span>
+          </div>
+          <div className="flex items-center gap-8 text-sm text-slate-400 font-medium">
+            <a href="#" className="hover:text-blue-600 transition-colors">Documentation</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">MOC Theory</a>
+            <a href="#" className="hover:text-blue-600 transition-colors">Support</a>
+          </div>
+          <p className="text-xs text-slate-400">© 2026 HydroGuard Systems. All rights reserved.</p>
+        </div>
+      </footer>
+
+      {/* Custom Scrollbar Styles */}
+      <style dangerouslySetInnerHTML={{ __html: `
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: #e2e8f0;
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: #cbd5e1;
+        }
+      `}} />
+    </div>
+  );
+}
