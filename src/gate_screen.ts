@@ -19,6 +19,12 @@ import { NodeRow, ReachRow, ProfileView } from './gate_view';
 /** Display-only unit factor: 1 m of water = rho*g/1e5 bar, rho = 1000 kg/m3, g = 9.81 (solver's G). */
 export const BAR_PER_M = 1000 * 9.81 / 1e5;
 
+/** Display-only `toFixed` without a negative zero: a value that rounds to zero prints `0.00`, not `-0.00`. */
+export function fixedNoNegZero(x: number, digits: number): string {
+    const s = x.toFixed(digits);
+    return /^-0\.?0*$/.test(s) ? s.slice(1) : s;
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // The chart
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -59,10 +65,14 @@ export function buildGateChartData(view: ProfileView): GateChartPoint[] {
     });
 }
 
-/** Reaches with at least one node below the vapour line (margin < 0) — the shaded spans. */
+/**
+ * Reaches with at least one node below the vapour line — the shaded spans. `!(margin >= 0)` rather
+ * than `margin < 0`: the same NaN-rejecting form B7 uses (`FIND_INIT_ADMISSIBLE`, `!(H >= Hvap)`), so a
+ * NaN head is shaded exactly where B7 flags it and chart and verdict cannot disagree.
+ */
 export function vapourCrossingReaches(view: ProfileView): ReachRow[] {
     return view.reaches.filter(r =>
-        view.nodes.some(n => n.node >= r.firstNode && n.node <= r.lastNode && n.margin < 0));
+        view.nodes.some(n => n.node >= r.firstNode && n.node <= r.lastNode && !(n.margin >= 0)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

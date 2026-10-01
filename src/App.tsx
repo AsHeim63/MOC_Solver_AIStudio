@@ -57,7 +57,7 @@ import { evaluateGate, GateReport } from './gate_checks';
 import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 // ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
 import {
-  buildGateChartData, vapourCrossingReaches, tooltipFields, classifyCheck, summaryMode,
+  buildGateChartData, vapourCrossingReaches, tooltipFields, classifyCheck, summaryMode, fixedNoNegZero,
   failedB7, runAnalysisState, GateChartPoint, CheckClass,
 } from './gate_screen';
 
@@ -1470,7 +1470,7 @@ export default function App() {
         const s = gateSummary;
         const fmtNode = (label: string, n: { head: number; pressure: number; distance: number }) => (
           <div className="flex justify-between gap-2"><span className="text-slate-500">{label}</span>
-            <span className="font-mono">H {n.head.toFixed(2)} m · p {n.pressure.toFixed(2)} m</span></div>
+            <span className="font-mono">H {fixedNoNegZero(n.head, 2)} m · p {fixedNoNegZero(n.pressure, 2)} m</span></div>
         );
         return (
       <main data-screen="gate" className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-6">
