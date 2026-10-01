@@ -3364,10 +3364,14 @@ function ASSERT_MIAB_RE_CONTRACT(
  *   |  3  | `Re < 0`                | B1   | contract-violation  | direction-convention error; SEE BELOW  |
  *   |  4  | `0 < Re < RE_MIAB_MIN`  | B3   | tool-limit          | the genuine model-validity limit       |
  *
- * SPEC GAP, NOT A RULING (D7.2). `SPEC_S63.md` §4 has NO row for arm 3. It is emitted as B1-class
- * because the input cannot describe a forward-flow system, and filing it under B3 would dress a
- * contract violation in tool-limit wording. This is a placement pending a user ruling on the spec —
- * raised at SHUTDOWN, exactly as DC-13's gap was at S64. Do not amend `SPEC_S63.md` from here.
+ * ARM 3 IS SPECIFIED — the gap is CLOSED (S67, 2026-08-31). It was raised at S66 and carried as an
+ * open item: the guard had refused a negative steady flow since S64, and `SPEC_S63.md` §4 had no row
+ * for it. The user delegated the ruling, and §4.1's B1 row was widened to cover it — B1 was already
+ * the general "the inputs cannot describe this system" row. NOT B3, which is a tool-limit state and
+ * would dress a contract violation in tool-limit wording; NOT a new code, which `CKPT_B2_AMENDMENT_
+ * BRIEF_S64.md` §2 forbids without a ruling. See `SPEC_S63.md` §4.1's amendment note and
+ * `DECISIONS.md` 2026-08-31. The emitted code and wording below are UNCHANGED by that close — they
+ * were already right; only the spec's authority for them was missing.
  *
  * ONE finding, not one per segment: the selection below (first non-finite, else minimum `Re`) is
  * the existing behaviour and it is load-bearing for the wording — `selectedByMinRe` governs the
