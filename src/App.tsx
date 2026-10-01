@@ -41,7 +41,8 @@ import {
   Legend, 
   ResponsiveContainer,
   AreaChart,
-  Area
+  Area,
+  ReferenceArea
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
@@ -53,7 +54,45 @@ import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatc
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
 // whatever the report says. Disabling the run, the modal and the gate screen are D-5c and D-6.
 import { evaluateGate, GateReport } from './gate_checks';
-import { buildProfileView } from './gate_view';
+import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
+// ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
+import {
+  buildGateChartData, vapourCrossingReaches, tooltipFields, classifyCheck, summaryMode,
+  failedB7, runAnalysisState, GateChartPoint, CheckClass,
+} from './gate_screen';
+
+/** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
+function GateTooltip({ active, payload }: { active?: boolean; payload?: any[] }) {
+  if (!active || !payload || payload.length === 0) return null;
+  const t = tooltipFields(payload[0].payload as GateChartPoint);
+  const hp = t.headAndPressure;
+  return (
+    <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-3 text-[11px] font-mono min-w-[18rem]">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        <span>DISTANCE {t.distance.toFixed(1)} m</span>
+        <span>TOTAL HEAD {hp.head.toFixed(2)} m</span>
+        <span>ELEVATION {t.elevation.toFixed(2)} m</span>
+        <span>PRESSURE {hp.pressureM.toFixed(2)} m ({hp.pressureBar.toFixed(2)} bar)</span>
+        {t.flow.map(f => (
+          <React.Fragment key={f.pipeId}>
+            <span>FLOW {f.m3s.toFixed(4)} m³/s ({f.m3h.toFixed(1)} m³/h){t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
+            <span>VELOCITY {f.velocity.toFixed(3)} m/s</span>
+          </React.Fragment>
+        ))}
+      </div>
+      <div className={cn("mt-1 pt-1 border-t border-slate-100", t.margin < 0 ? "text-red-600 font-bold" : "")}>
+        MARGIN ABOVE VAPOUR {t.margin.toFixed(2)} m
+      </div>
+    </div>
+  );
+}
+
+const CHECK_CLASS_STYLE: Record<CheckClass, { mark: string; cls: string }> = {
+  'pass':          { mark: '✓', cls: 'text-emerald-600' },
+  'fail-blocking': { mark: '✗', cls: 'text-red-600' },
+  'fail-advisory': { mark: '!', cls: 'text-amber-600' },
+  'not-evaluated': { mark: '–', cls: 'text-slate-400' },
+};
 
 // THERE IS NO DEFAULT PIPELINE PROFILE. The profile is the user's data — it arrives from a CSV or
 // is typed into the table, and this program has no business inventing one (user, 2026-09-12).
@@ -150,7 +189,9 @@ export default function App() {
   // engine ran" is an observation and not an assumption. `gateCrash` is separate from `simError`
   // on purpose: a gate that throws must not be reported as a refused run.
   const [gateReport, setGateReport] = useState<GateReport | null>(null);
-  const [gateProfile, setGateProfile] = useState<{ nodes: number; reaches: number } | null>(null);
+  const [gateProfile, setGateProfile] = useState<ProfileView | null>(null);
+  // ── D-5c: which screen. 'input' = Screen 1 (inputs + transient results), 'gate' = Screen 2.
+  const [view, setView] = useState<'input' | 'gate'>('input');
   const [gateCrash, setGateCrash] = useState<string | null>(null);
   const [valveCheckValve, setValveCheckValve] = useState(false);
   // Gravity-fed upstream (gravity-valve only). The pressure at node 0, plus node 0's own
@@ -407,9 +448,9 @@ export default function App() {
         // instead of taking a working run down with it.
         try {
           const report = evaluateGate(scenario, inputs);
-          const view = report.steady ? buildProfileView(report.steady) : null;
+          const profile = report.steady ? buildProfileView(report.steady) : null;
           setGateReport(report);
-          setGateProfile(view ? { nodes: view.nodes.length, reaches: view.reaches.length } : null);
+          setGateProfile(profile);
           setGateCrash(null);
         } catch (gateError) {
           console.error("Gate evaluation failed", gateError);
@@ -430,6 +471,45 @@ export default function App() {
         setIsSimulating(false);
       }
     }, 100);
+  };
+
+  // ── D-5c: `Run Steady-State` — evaluates the gate, runs NOTHING ───────────────────────────────
+  // PLAN_S69.md §2 D-5c: input phase blocked -> stay on Screen 1 (the gate-1 modal is D-6; until
+  // then the status line beside the button carries the findings). Otherwise -> Screen 2. A gate
+  // that throws stays on Screen 1 with "Gate could not run": with no report there is nothing to
+  // gate the run on, so it fails closed.
+  const handleRunSteadyState = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      try {
+        const report = evaluateGate(scenario, buildDispatchInputs());
+        setGateReport(report);
+        setGateProfile(report.steady ? buildProfileView(report.steady) : null);
+        setGateCrash(null);
+        if (!report.inputBlocked) {
+          // Entering Screen 2 stops the transient animation loop: its effect lives at the top of
+          // App and does not unmount when the results pane stops rendering (PLAN_S69.md §8).
+          setIsAnimating(false);
+          setView('gate');
+        }
+      } catch (gateError) {
+        console.error("Gate evaluation failed", gateError);
+        setGateReport(null);
+        setGateProfile(null);
+        setGateCrash(gateError instanceof Error ? gateError.message : String(gateError));
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 100);
+  };
+
+  // ── D-5c: Screen 2's derived display data. Projections of the report, nothing computed. ──────
+  const gateChart = useMemo(() => gateProfile ? buildGateChartData(gateProfile) : [], [gateProfile]);
+  const gateCrossings = useMemo(() => gateProfile ? vapourCrossingReaches(gateProfile) : [], [gateProfile]);
+  const gateSummary = useMemo(() => gateProfile ? summariseProfile(gateProfile) : null, [gateProfile]);
+  const runState = gateReport ? runAnalysisState(gateReport) : { available: false, reason: 'No gate report.' };
+  const SCENARIO_LABEL: Record<Scenario, string> = {
+    'pump-trip': 'Pump trip', 'pump-valve': 'Pump-fed + valve closure', 'gravity-valve': 'Gravity-fed + valve closure',
   };
 
   // Derive simulation time bounds
@@ -585,6 +665,7 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-4">
+            {view === 'input' ? (
             <button
               onClick={() => setShowInputs(!showInputs)}
               className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"
@@ -592,6 +673,16 @@ export default function App() {
               {showInputs ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
               {showInputs ? 'Hide Input Data' : 'Expand Input Data'}
             </button>
+            ) : (
+            // Back To Start is navigation, never a reset: every entered value stays (PLAN_S68 §5.4).
+            <button
+              onClick={() => setView('input')}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"
+            >
+              <SkipBack size={16} />
+              Back To Start
+            </button>
+            )}
             <div className="w-px h-6 bg-slate-200 mx-2" />
             <button
               onClick={() => {
@@ -602,11 +693,14 @@ export default function App() {
               className="text-xs font-bold text-slate-400 hover:text-red-500 transition-colors uppercase tracking-wider"
             >
               Reset Data
-            {/* ── D-5b: the gate's verdict, stated but not enforced ──────────────────────
-                This step's only claim is that the engine runs on real input, so it has to
-                say so — "the app still works" is true whether it ran or not. It blocks
-                nothing: the Run button beside it is untouched. D-5c does the blocking. */}
-            {gateCrash ? (
+            </button>
+            {/* ── The gate's status line — D-5b, moved OUT of the Reset Data button (D-5c) ──
+                It used to sit inside that button, so the row's gap-4 never applied ("Reset
+                DataGate — ..."). As its own sibling it gets the row's gap, beside the primary
+                button. On Screen 2 a blocked run states its reason here (PLAN_S68 §2 D4). */}
+            {view === 'gate' && gateReport && !runState.available ? (
+              <span className="text-xs font-bold text-red-600 max-w-[22rem]">{runState.reason}</span>
+            ) : gateCrash ? (
               <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate" title={gateCrash}>
                 Gate could not run
               </span>
@@ -621,22 +715,28 @@ export default function App() {
                       : 'No steady state was returned.')
                   + (gateReport.reContractBlocked ? ' Reynolds contract reported.' : '')
                   + (gateReport.stateError ? ` State phase threw: ${gateReport.stateError}` : '')
-                  + ' Nothing is blocked by this yet.'
+                  + gateReport.blocking.map(f => `\n[${f.code}] ${f.where}: ${f.message}`).join('')
                 }
               >
                 <span className="font-bold text-slate-600">Gate</span>
                 {` — ${gateReport.blocking.length} blocking, ${gateReport.advisory.length} advisory`}
-                {gateProfile ? ` · ${gateProfile.nodes} nodes` : ''}
+                {gateProfile ? ` · ${gateProfile.nodes.length} nodes` : ''}
               </span>
             ) : null}
-            </button>
+            {/* Screen 1: `Run Steady-State` evaluates the gate only (PLAN_S68 §2 D7).
+                Screen 2: `Run Analysis` runs today's handleRunSimulation unchanged, then returns
+                to Screen 1 where the transient renders. Disabled off `runAnalysisAvailable`. */}
+            {(() => {
+              const onGate = view === 'gate';
+              const disabled = isSimulating || (onGate && !runState.available);
+              return (
             <button
-              onClick={handleRunSimulation}
-              disabled={isSimulating}
+              onClick={onGate ? () => { handleRunSimulation(); setView('input'); } : handleRunSteadyState}
+              disabled={disabled}
               className={cn(
                 "flex items-center gap-2 px-6 py-2.5 rounded-full font-semibold transition-all shadow-md",
-                isSimulating 
-                  ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
+                disabled
+                  ? "bg-slate-100 text-slate-400 cursor-not-allowed"
                   : "bg-blue-600 text-white hover:bg-blue-700 active:scale-95 hover:shadow-blue-200"
               )}
             >
@@ -645,8 +745,10 @@ export default function App() {
             ) : (
               <Play size={18} fill="currentColor" />
             )}
-            {isSimulating ? "Analyzing..." : "Run Simulation"}
+            {isSimulating ? "Analyzing..." : onGate ? "Run Analysis" : "Run Steady-State"}
           </button>
+              );
+            })()}
           </div>
         </div>
       </header>
@@ -663,6 +765,7 @@ export default function App() {
         </div>
       )}
 
+      {view === 'input' && (
       <main className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-8">
         {/* Sidebar - Inputs */}
         {showInputs && (
@@ -1355,6 +1458,121 @@ export default function App() {
               )}
             </div>
       </main>
+      )}
+
+      {/* ── Screen 2 — the gate screen (Row 3.11 Unit C, D-5c) ──────────────────────────────
+          Profile + HGL + vapour line, the 7-field tooltip, the summary rail and the findings
+          rail, all from `gateProfile` / `gateReport` through gate_screen.ts. Nothing here
+          computes a head, a pressure, a margin, a velocity or a verdict. */}
+      {view === 'gate' && gateReport && (() => {
+        const mode = summaryMode(gateReport);
+        const b7 = failedB7(gateReport);
+        const s = gateSummary;
+        const fmtNode = (label: string, n: { head: number; pressure: number; distance: number }) => (
+          <div className="flex justify-between gap-2"><span className="text-slate-500">{label}</span>
+            <span className="font-mono">H {n.head.toFixed(2)} m · p {n.pressure.toFixed(2)} m</span></div>
+        );
+        return (
+      <main data-screen="gate" className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-6">
+        <section className="flex-1 min-w-0 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+          <h3 className="text-lg font-bold">Steady-State Profile</h3>
+          <p className="text-sm text-slate-500 mb-4">Pipeline, pressure line (HGL) and vapour line — {SCENARIO_LABEL[scenario]}</p>
+          {mode === 'evidence' && (
+            <p className="mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs font-bold text-amber-700">
+              Computed from an out-of-contract flow — shown as evidence, not as a result.
+            </p>
+          )}
+          {gateProfile ? (
+            <div className="h-[460px]">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                <LineChart data={gateChart} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="distance" type="number" domain={['dataMin', 'dataMax']}
+                    label={{ value: 'Distance (m)', position: 'insideBottom', offset: -5, fontSize: 11, fontWeight: 600 }}
+                    tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} />
+                  <YAxis label={{ value: 'Head (m)', angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
+                    tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} domain={['auto', 'auto']} />
+                  <Tooltip content={<GateTooltip />} />
+                  <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
+                  {gateCrossings.map(r => (
+                    <React.Fragment key={r.index}><ReferenceArea x1={r.startDistance} x2={r.endDistance} {...({ fill: '#ef4444', fillOpacity: 0.12 } as any) /* recharts 3 Props typing omits SVG fill in this setup */}
+                      label={b7 ? 'B7 — below vapour' : 'below vapour'} /></React.Fragment>
+                  ))}
+                  <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
+                  <Line name="Vapour line" type="linear" dataKey="vapour" stroke="#dc2626" strokeWidth={1.5} strokeDasharray="2 3" dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-500">
+              No steady state was computed{gateReport.stateError ? ` — the state phase threw: ${gateReport.stateError}` : ''}.
+            </p>
+          )}
+          {b7 && b7.findings.map((f, i) => (
+            <p key={i} className="mt-3 text-xs text-red-700"><span className="font-bold">B7 · {f.where}:</span> {f.message}</p>
+          ))}
+        </section>
+
+        <aside className="w-[300px] shrink-0 space-y-4">
+          <section data-rail="summary" className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-xs space-y-1.5">
+            <h4 className="font-bold text-sm text-slate-700 mb-2">Steady State</h4>
+            <div className="flex justify-between gap-2"><span className="text-slate-500">Scenario</span><span>{SCENARIO_LABEL[scenario]}</span></div>
+            {mode === 'numbers' && s ? (
+              <>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Flow</span>
+                  <span className="font-mono">{s.flow.toFixed(4)} m³/s ({(s.flow * 3600).toFixed(1)} m³/h)</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Velocity</span>
+                  <span className="font-mono">{s.velocityMin.reach === s.velocityMax.reach
+                    ? `${s.velocityMax.value.toFixed(3)} m/s`
+                    : `${s.velocityMin.value.toFixed(3)}–${s.velocityMax.value.toFixed(3)} m/s`}</span></div>
+                {fmtNode('Inlet', s.inlet)}
+                {fmtNode('Outlet', s.outlet)}
+                {fmtNode('Worst point', s.worst)}
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Worst at</span>
+                  <span className="font-mono">{s.worst.distance.toFixed(1)} m · margin {s.worst.margin.toFixed(2)} m</span></div>
+                <div className="flex justify-between gap-2"><span className="text-slate-500">Head loss along pipeline</span>
+                  <span className="font-mono">{s.headLossAlongPipeline.toFixed(2)} m</span></div>
+              </>
+            ) : (
+              <p className="text-slate-500">
+                {mode === 'evidence'
+                  ? 'Numbers suppressed: computed from an out-of-contract flow. See the findings below.'
+                  : 'No steady state was computed.'}
+              </p>
+            )}
+          </section>
+
+          <section data-rail="findings" className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-xs">
+            <h4 className="font-bold text-sm text-slate-700 mb-2">
+              Checks — {gateReport.blocking.length} blocking, {gateReport.advisory.length} advisory
+            </h4>
+            <ul className="space-y-2">
+              {gateReport.checks.map(c => {
+                const k = classifyCheck(c);
+                const st = CHECK_CLASS_STYLE[k];
+                return (
+                  <li key={c.code} data-check={c.code} data-class={k}>
+                    <div className={cn("flex gap-2 font-bold", st.cls)}>
+                      <span className="w-3">{st.mark}</span>
+                      <span>{c.code}</span>
+                      <span className="font-normal">{c.severity} · {c.verdict}</span>
+                    </div>
+                    {c.verdict === 'not-evaluated' && c.skipped && (
+                      <p className="ml-5 text-slate-400">{c.skipped}</p>
+                    )}
+                    {c.findings.map((f, i) => (
+                      <p key={i} className="ml-5 text-slate-600"><span className="font-semibold">{f.where}:</span> {f.message}</p>
+                    ))}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        </aside>
+      </main>
+        );
+      })()}
 
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-12 mt-12">
