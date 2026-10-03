@@ -66,13 +66,18 @@ export function buildGateChartData(view: ProfileView): GateChartPoint[] {
 }
 
 /**
- * Reaches with at least one node below the vapour line — the shaded spans. `!(margin >= 0)` rather
- * than `margin < 0`: the same NaN-rejecting form B7 uses (`FIND_INIT_ADMISSIBLE`, `!(H >= Hvap)`), so a
- * NaN head is shaded exactly where B7 flags it and chart and verdict cannot disagree.
+ * Below the vapour line. `!(margin >= 0)` rather than `margin < 0`: the same NaN-rejecting form B7
+ * uses (`FIND_INIT_ADMISSIBLE`, `!(H >= Hvap)`), so a NaN head counts exactly where B7 flags it and
+ * chart, tooltip and verdict cannot disagree. The one test, used by the shading and the tooltip.
  */
+export function isBelowVapour(margin: number): boolean {
+    return !(margin >= 0);
+}
+
+/** Reaches with at least one node below the vapour line — the shaded spans. */
 export function vapourCrossingReaches(view: ProfileView): ReachRow[] {
     return view.reaches.filter(r =>
-        view.nodes.some(n => n.node >= r.firstNode && n.node <= r.lastNode && !(n.margin >= 0)));
+        view.nodes.some(n => n.node >= r.firstNode && n.node <= r.lastNode && isBelowVapour(n.margin)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -126,14 +131,14 @@ export function classifyCheck(c: GateCheck): CheckClass {
 }
 
 /**
- * PLAN_S68.md §1.3. `reContractBlocked` is the ONLY trigger for suppressing the numbers; a B7 keeps
- * them, because they are the finding's own evidence.
+ * Numbers are never hidden when a steady state exists (Assaf's rulings, `builder/ANSWERS.md`
+ * 2026-10-02 Q2, which replace PLAN_S68.md §1.3's suppression): a partially filled pipe and a
+ * non-turbulent flow both keep every number, each with its warning from `numberCaveats`.
  */
-export type SummaryMode = 'no-steady' | 'numbers' | 'evidence';
+export type SummaryMode = 'no-steady' | 'numbers';
 
 export function summaryMode(report: GateReport): SummaryMode {
-    if (!report.steady) return 'no-steady';
-    return report.reContractBlocked ? 'evidence' : 'numbers';
+    return report.steady ? 'numbers' : 'no-steady';
 }
 
 /** The B7 check, when it failed — its findings are shown verbatim beside the shaded reach. */
@@ -141,12 +146,53 @@ export function failedB7(report: GateReport): GateCheck | undefined {
     return report.checks.find(c => c.code === 'B7' && c.verdict === 'fail');
 }
 
-/** `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1); the reason lists the blockers. */
+// The ruled wording, verbatim (`builder/ANSWERS.md` 2026-10-02 Q2).
+export const PARTIALLY_FILLED_WARNING =
+    'Partially filled pipe — the calculation model does not cover this state. These numbers are not reliable.';
+export const PARTIALLY_FILLED_BLOCK_REASON =
+    'Transient analysis prerequisites do not exist - partially filled pipe';
+export const NON_TURBULENT_NOTE =
+    'Non-turbulent flow — the calculation model does not cover this state. These numbers are not reliable.';
+
+/**
+ * Partially filled pipe: the steady state was computed and its pressure line is below vapour (B7
+ * failed in the state phase). A B7 with no steady state is the input-phase reservoir check, which
+ * never reaches Screen 2.
+ */
+export function isPartiallyFilled(report: GateReport): boolean {
+    return !!report.steady && !!failedB7(report);
+}
+
+/**
+ * The warnings shown beside the steady-state numbers (summary rail, chart, tooltip). Non-turbulent
+ * reads the engine's own `reContractBlocked` flag — the Reynolds-contract guard's verdict — rather
+ * than re-deriving a Reynolds number here.
+ */
+export function numberCaveats(report: GateReport): string[] {
+    if (!report.steady) return [];
+    const out: string[] = [];
+    if (isPartiallyFilled(report)) out.push(PARTIALLY_FILLED_WARNING);
+    if (report.reContractBlocked) out.push(NON_TURBULENT_NOTE);
+    return out;
+}
+
+/**
+ * `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1). The reason: the ruled
+ * partially-filled message when B7 blocks; any other blocking codes are still named, never dropped.
+ */
 export function runAnalysisState(report: GateReport): { available: boolean; reason: string } {
     if (report.runAnalysisAvailable) return { available: true, reason: '' };
     const codes = report.checks
         .filter(c => classifyCheck(c) === 'fail-blocking')
         .map(c => c.code);
+    if (isPartiallyFilled(report)) {
+        const others = codes.filter(c => c !== 'B7');
+        return {
+            available: false,
+            reason: PARTIALLY_FILLED_BLOCK_REASON +
+                    (others.length ? `. Also blocking: ${others.join(', ')}. See the findings list.` : ''),
+        };
+    }
     return {
         available: false,
         reason: `Run Analysis unavailable: ${report.blocking.length} blocking finding` +

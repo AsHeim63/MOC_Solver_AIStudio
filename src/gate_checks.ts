@@ -85,9 +85,9 @@ export interface GateReport {
      *
      * When it did, `meshNetwork` continued past the finding and `steady.layout.miab` carries
      * coefficients frozen at an out-of-contract `Re` — evidence of the fault, not a usable mesh
-     * (`RESULTS_S67.md` §8a). This is the ONLY condition under which the screen suppresses its
-     * numeric readouts: B7 comes from a different call on a perfectly sound mesh, and blanking the
-     * summary there would hide exactly the siphon case `SPEC_S63.md` §5 exists to explain.
+     * (`RESULTS_S67.md` §8a). The screen keeps its numeric readouts here and shows a non-turbulent
+     * warning beside them (Assaf's ruling, `builder/ANSWERS.md` 2026-10-02 Q2, which replaced the
+     * earlier suppression); B7 comes from a different call on a perfectly sound mesh.
      *
      * Already tracked internally to bound A1 (L169 — the advisory reads the guard's own verdict
      * rather than re-deriving a floor). This exposes the flag it was already computing; it does not

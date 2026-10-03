@@ -58,11 +58,11 @@ import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 // ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
 import {
   buildGateChartData, vapourCrossingReaches, tooltipFields, classifyCheck, summaryMode, fixedNoNegZero,
-  failedB7, runAnalysisState, GateChartPoint, CheckClass,
+  failedB7, runAnalysisState, GateChartPoint, CheckClass, numberCaveats, isBelowVapour,
 } from './gate_screen';
 
 /** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
-function GateTooltip({ active, payload }: { active?: boolean; payload?: any[] }) {
+function GateTooltip({ active, payload, caveats }: { active?: boolean; payload?: any[]; caveats?: string[] }) {
   if (!active || !payload || payload.length === 0) return null;
   const t = tooltipFields(payload[0].payload as GateChartPoint);
   const hp = t.headAndPressure;
@@ -70,9 +70,9 @@ function GateTooltip({ active, payload }: { active?: boolean; payload?: any[] })
     <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-3 text-[11px] font-mono min-w-[18rem]">
       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
         <span>DISTANCE {t.distance.toFixed(1)} m</span>
-        <span>TOTAL HEAD {hp.head.toFixed(2)} m</span>
+        <span>TOTAL HEAD {fixedNoNegZero(hp.head, 2)} m</span>
         <span>ELEVATION {t.elevation.toFixed(2)} m</span>
-        <span>PRESSURE {hp.pressureM.toFixed(2)} m ({hp.pressureBar.toFixed(2)} bar)</span>
+        <span>PRESSURE {fixedNoNegZero(hp.pressureM, 2)} m ({fixedNoNegZero(hp.pressureBar, 2)} bar)</span>
         {t.flow.map(f => (
           <React.Fragment key={f.pipeId}>
             <span>FLOW {f.m3s.toFixed(4)} m³/s ({f.m3h.toFixed(1)} m³/h){t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
@@ -80,9 +80,12 @@ function GateTooltip({ active, payload }: { active?: boolean; payload?: any[] })
           </React.Fragment>
         ))}
       </div>
-      <div className={cn("mt-1 pt-1 border-t border-slate-100", t.margin < 0 ? "text-red-600 font-bold" : "")}>
+      <div className={cn("mt-1 pt-1 border-t border-slate-100", isBelowVapour(t.margin) ? "text-red-600 font-bold" : "")}>
         MARGIN ABOVE VAPOUR {t.margin.toFixed(2)} m
       </div>
+      {caveats?.map(c => (
+        <div key={c} className="mt-1 font-sans font-bold text-amber-700 max-w-[18rem] whitespace-normal">{c}</div>
+      ))}
     </div>
   );
 }
@@ -711,7 +714,7 @@ export default function App() {
                   (gateReport.inputBlocked
                     ? 'Stopped at the input checks, so the steady state was never computed.'
                     : gateProfile
-                      ? `Steady state computed: ${gateProfile.nodes} nodes, ${gateProfile.reaches} reaches.`
+                      ? `Steady state computed: ${gateProfile.nodes.length} nodes, ${gateProfile.reaches.length} reaches.`
                       : 'No steady state was returned.')
                   + (gateReport.reContractBlocked ? ' Reynolds contract reported.' : '')
                   + (gateReport.stateError ? ` State phase threw: ${gateReport.stateError}` : '')
@@ -1467,7 +1470,14 @@ export default function App() {
       {view === 'gate' && gateReport && (() => {
         const mode = summaryMode(gateReport);
         const b7 = failedB7(gateReport);
+        const caveats = numberCaveats(gateReport);
         const s = gateSummary;
+        // The ruled warnings (ANSWERS 2026-10-02 Q2), shown beside every place the numbers appear.
+        const caveatBox = caveats.length > 0 && (
+          <div data-caveats className="mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs font-bold text-amber-700 space-y-1">
+            {caveats.map(c => <p key={c}>{c}</p>)}
+          </div>
+        );
         const fmtNode = (label: string, n: { head: number; pressure: number; distance: number }) => (
           <div className="flex justify-between gap-2"><span className="text-slate-500">{label}</span>
             <span className="font-mono">H {fixedNoNegZero(n.head, 2)} m · p {fixedNoNegZero(n.pressure, 2)} m</span></div>
@@ -1477,11 +1487,7 @@ export default function App() {
         <section className="flex-1 min-w-0 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
           <h3 className="text-lg font-bold">Steady-State Profile</h3>
           <p className="text-sm text-slate-500 mb-4">Pipeline, pressure line (HGL) and vapour line — {SCENARIO_LABEL[scenario]}</p>
-          {mode === 'evidence' && (
-            <p className="mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs font-bold text-amber-700">
-              Computed from an out-of-contract flow — shown as evidence, not as a result.
-            </p>
-          )}
+          {caveatBox}
           {gateProfile ? (
             <div className="h-[460px]">
               <ResponsiveContainer width="100%" height="100%" minWidth={0}>
@@ -1492,7 +1498,7 @@ export default function App() {
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} />
                   <YAxis label={{ value: 'Head (m)', angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} domain={['auto', 'auto']} />
-                  <Tooltip content={<GateTooltip />} />
+                  <Tooltip content={<GateTooltip caveats={caveats} />} />
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
                   {gateCrossings.map(r => (
                     <React.Fragment key={r.index}><ReferenceArea x1={r.startDistance} x2={r.endDistance} {...({ fill: '#ef4444', fillOpacity: 0.12 } as any) /* recharts 3 Props typing omits SVG fill in this setup */}
@@ -1520,6 +1526,7 @@ export default function App() {
             <div className="flex justify-between gap-2"><span className="text-slate-500">Scenario</span><span>{SCENARIO_LABEL[scenario]}</span></div>
             {mode === 'numbers' && s ? (
               <>
+                {caveatBox}
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Flow</span>
                   <span className="font-mono">{s.flow.toFixed(4)} m³/s ({(s.flow * 3600).toFixed(1)} m³/h)</span></div>
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Velocity</span>
@@ -1535,11 +1542,7 @@ export default function App() {
                   <span className="font-mono">{s.headLossAlongPipeline.toFixed(2)} m</span></div>
               </>
             ) : (
-              <p className="text-slate-500">
-                {mode === 'evidence'
-                  ? 'Numbers suppressed: computed from an out-of-contract flow. See the findings below.'
-                  : 'No steady state was computed.'}
-              </p>
+              <p className="text-slate-500">No steady state was computed.</p>
             )}
           </section>
 
