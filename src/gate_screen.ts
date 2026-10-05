@@ -12,7 +12,7 @@
 // SERIES-ONLY. Node-to-reach attribution assumes each reach's nodes are the contiguous range
 // firstNode..lastNode, which holds on a series main (BACKLOG: pipeIds/pipeParams pairing).
 
-import { VAPOR_HEAD_AT } from './solver';
+import { VAPOR_HEAD_AT, GateCode } from './solver';
 import { GateCheck, GateReport } from './gate_checks';
 import { NodeRow, ReachRow, ProfileView } from './gate_view';
 
@@ -149,8 +149,6 @@ export function failedB7(report: GateReport): GateCheck | undefined {
 // The ruled wording, verbatim (`builder/ANSWERS.md` 2026-10-02 Q2).
 export const PARTIALLY_FILLED_WARNING =
     'Partially filled pipe — the calculation model does not cover this state. These numbers are not reliable.';
-export const PARTIALLY_FILLED_BLOCK_REASON =
-    'Transient analysis prerequisites do not exist - partially filled pipe';
 export const NON_TURBULENT_NOTE =
     'Non-turbulent flow — the calculation model does not cover this state. These numbers are not reliable.';
 
@@ -176,26 +174,88 @@ export function numberCaveats(report: GateReport): string[] {
     return out;
 }
 
-/**
- * `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1). The reason: the ruled
- * partially-filled message when B7 blocks; any other blocking codes are still named, never dropped.
- */
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// What the user reads — D-6 (Assaf's rulings, `builder/ANSWERS.md` 2026-10-03 Q2 and 2026-10-04 Q3)
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Every gate surface (header, Screen 2's rail, the modal) prints `gateMessage` and nothing else: no
+// check codes, no list of which checks ran, no log. Pass = one line, then one plain "Note: ..." per
+// advisory that fired. Fail = "System Check Failed:", then one short plain line per distinct problem.
+// The line is picked by CODE, and a check counts only through its engine verdict and severity
+// (`classifyCheck`), so an advisory can never print as a problem, nor a problem as a note (L169).
+
+export const GATE_PASS_LINE  = 'All checks passed - transient simulation can be run';
+export const GATE_FAIL_TITLE = 'System Check Failed:';
+/** The state phase threw: no blocking check failed, yet there is no steady state to run from. */
+export const STEADY_FAILED_LINE = 'Steady state could not be calculated';
+
+/** One short plain line per blocking check (builder's wording, LOOK-AT 2026-10-03, not overruled). */
+const PROBLEM_LINE: Record<GateCode, string> = {
+    B1: 'Missing or invalid input value',
+    B2: 'Zero flow - there is no transient to calculate',
+    B3: 'Too low flow - non turbulent flow calculations are unreliable',
+    B4: 'Negative pressure entered',
+    B5: 'Insufficient pressure/head',
+    B6: 'Invalid valve coefficient (Kv)',
+    B7: 'Partially filled pipe section',
+    B8: 'Pipe list empty, or a pipe with zero or negative length or diameter',
+    B9: 'Invalid valve closure timing',
+    // Advisories: the text after "Note: " (SPEC_S63.md §4.2's conditions, in plain words).
+    A1: 'Low flow - the accuracy of the results has not been verified at this flow',
+    A2: 'Velocity above 3 m/s',
+    A3: 'Pressure line within 2 m of the vapour line',
+    A4: 'A pipe segment is shorter than one calculation step',
+    A5: 'Valve closes faster than one pressure-wave round trip - surge will be maximal',
+};
+
+export interface GateMessage {
+    /** `report.runAnalysisAvailable`, read, never re-derived (§1.1). */
+    passed: boolean;
+    /** Distinct problems, B1…B9 order. Empty when `passed`. */
+    problems: string[];
+    /**
+     * One "Note: ..." per advisory check that failed. One line per CHECK, not per finding, so there
+     * are at most five (A1…A5) — the ruled cap of 5 can never be exceeded and nothing is dropped.
+     */
+    notes: string[];
+}
+
+export function gateMessage(report: GateReport): GateMessage {
+    const problems: string[] = [];
+    const notes: string[] = [];
+    for (const c of report.checks) {
+        const k = classifyCheck(c);
+        if (k === 'fail-blocking' && !problems.includes(PROBLEM_LINE[c.code])) problems.push(PROBLEM_LINE[c.code]);
+        if (k === 'fail-advisory') notes.push(`Note: ${PROBLEM_LINE[c.code]}`);
+    }
+    if (report.stateError !== undefined) problems.push(STEADY_FAILED_LINE);
+    const passed = report.runAnalysisAvailable;
+    return { passed, problems: passed ? [] : problems, notes };
+}
+
+/** `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1); the reason is the ruled fail text. */
 export function runAnalysisState(report: GateReport): { available: boolean; reason: string } {
     if (report.runAnalysisAvailable) return { available: true, reason: '' };
-    const codes = report.checks
-        .filter(c => classifyCheck(c) === 'fail-blocking')
-        .map(c => c.code);
-    if (isPartiallyFilled(report)) {
-        const others = codes.filter(c => c !== 'B7');
-        return {
-            available: false,
-            reason: PARTIALLY_FILLED_BLOCK_REASON +
-                    (others.length ? `. Also blocking: ${others.join(', ')}. See the findings list.` : ''),
-        };
-    }
-    return {
-        available: false,
-        reason: `Run Analysis unavailable: ${report.blocking.length} blocking finding` +
-                `${report.blocking.length === 1 ? '' : 's'} (${codes.join(', ')}). See the findings list.`,
-    };
+    return { available: false, reason: `${GATE_FAIL_TITLE} ${gateMessage(report).problems.join('; ')}` };
+}
+
+/**
+ * Where `Acknowledge & Return` goes (PLAN_S68.md §5.3, MOCKUP_NOTES_S65.md §7.1). Routing is by
+ * check code to owning screen, never by reading `finding.where`.
+ *   - Gate 1 (`inputBlocked`): Screen 1 — every gate-1 fault is a field on it.
+ *   - Gate 2, B7 only: stay on Screen 2 — B7 has no field; the shaded chart reach is where it is.
+ *   - Gate 2, anything else (B2/B3/the Reynolds B1 -> the flow input; a geometry B1 -> the pipe
+ *     table; a state phase that threw): Screen 1. Screen 2 has no editable table (Q2 built none).
+ */
+export function acknowledgeReturnTo(report: GateReport): 'input' | 'gate' {
+    if (report.inputBlocked) return 'input';
+    const failing = report.checks.filter(c => classifyCheck(c) === 'fail-blocking').map(c => c.code);
+    const b7Only = report.stateError === undefined && failing.length > 0 && failing.every(c => c === 'B7');
+    return b7Only ? 'gate' : 'input';
+}
+
+/** The 3-second auto-dismiss: only the genuinely clean case (PLAN_S68.md §4 6.6). Else it waits. */
+export function modalAutoDismiss(report: GateReport): boolean {
+    const m = gateMessage(report);
+    return m.passed && m.notes.length === 0;
 }

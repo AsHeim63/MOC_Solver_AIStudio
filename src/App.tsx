@@ -57,8 +57,9 @@ import { evaluateGate, GateReport } from './gate_checks';
 import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 // ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
 import {
-  buildGateChartData, vapourCrossingReaches, tooltipFields, classifyCheck, summaryMode, fixedNoNegZero,
-  failedB7, runAnalysisState, GateChartPoint, CheckClass, numberCaveats, isBelowVapour,
+  buildGateChartData, vapourCrossingReaches, tooltipFields, summaryMode, fixedNoNegZero,
+  runAnalysisState, GateChartPoint, numberCaveats, isBelowVapour,
+  gateMessage, acknowledgeReturnTo, modalAutoDismiss, GATE_PASS_LINE, GATE_FAIL_TITLE,
 } from './gate_screen';
 
 /** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
@@ -90,12 +91,27 @@ function GateTooltip({ active, payload, caveats }: { active?: boolean; payload?:
   );
 }
 
-const CHECK_CLASS_STYLE: Record<CheckClass, { mark: string; cls: string }> = {
-  'pass':          { mark: '✓', cls: 'text-emerald-600' },
-  'fail-blocking': { mark: '✗', cls: 'text-red-600' },
-  'fail-advisory': { mark: '!', cls: 'text-amber-600' },
-  'not-evaluated': { mark: '–', cls: 'text-slate-400' },
-};
+/**
+ * D-6: the gate's verdict as the user reads it — header, Screen 2's rail and the modal all render
+ * this one view of `gateMessage` (ANSWERS 2026-10-03 Q2, 2026-10-04 Q3). No codes, no check list,
+ * no log. Notes are plain text: no fail styling, they never read as a problem.
+ */
+function GateMessageView({ report }: { report: GateReport }) {
+  const m = gateMessage(report);
+  return (
+    <div data-gate-message={m.passed ? 'pass' : 'fail'} className="space-y-0.5">
+      {m.passed ? (
+        <p className="font-bold text-emerald-700">{GATE_PASS_LINE}</p>
+      ) : (
+        <>
+          <p className="font-bold text-red-600">{GATE_FAIL_TITLE}</p>
+          {m.problems.map(p => <p key={p} data-gate-problem className="text-red-600">{p}</p>)}
+        </>
+      )}
+      {m.notes.map(n => <p key={n} data-gate-note className="text-slate-600">{n}</p>)}
+    </div>
+  );
+}
 
 // THERE IS NO DEFAULT PIPELINE PROFILE. The profile is the user's data — it arrives from a CSV or
 // is typed into the table, and this program has no business inventing one (user, 2026-09-12).
@@ -196,6 +212,8 @@ export default function App() {
   // ── D-5c: which screen. 'input' = Screen 1 (inputs + transient results), 'gate' = Screen 2.
   const [view, setView] = useState<'input' | 'gate'>('input');
   const [gateCrash, setGateCrash] = useState<string | null>(null);
+  // ── D-6: the gate modal, opened each time `Run Steady-State` evaluates the gate.
+  const [gateModalOpen, setGateModalOpen] = useState(false);
   const [valveCheckValve, setValveCheckValve] = useState(false);
   // Gravity-fed upstream (gravity-valve only). The pressure at node 0, plus node 0's own
   // elevation. `inletPressure` replaces the former `gravityHead`, which was a datum head —
@@ -477,10 +495,9 @@ export default function App() {
   };
 
   // ── D-5c: `Run Steady-State` — evaluates the gate, runs NOTHING ───────────────────────────────
-  // PLAN_S69.md §2 D-5c: input phase blocked -> stay on Screen 1 (the gate-1 modal is D-6; until
-  // then the status line beside the button carries the findings). Otherwise -> Screen 2. A gate
-  // that throws stays on Screen 1 with "Gate could not run": with no report there is nothing to
-  // gate the run on, so it fails closed.
+  // PLAN_S69.md §2 D-5c: input phase blocked -> stay on Screen 1 with the gate-1 modal (D-6).
+  // Otherwise -> Screen 2 with the gate-2 modal. A gate that throws stays on Screen 1 with "Gate
+  // could not run": with no report there is nothing to gate the run on, so it fails closed.
   const handleRunSteadyState = () => {
     setIsSimulating(true);
     setTimeout(() => {
@@ -489,6 +506,7 @@ export default function App() {
         setGateReport(report);
         setGateProfile(report.steady ? buildProfileView(report.steady) : null);
         setGateCrash(null);
+        setGateModalOpen(true);
         if (!report.inputBlocked) {
           // Entering Screen 2 stops the transient animation loop: its effect lives at the top of
           // App and does not unmount when the results pane stops rendering (PLAN_S69.md §8).
@@ -511,6 +529,12 @@ export default function App() {
   const gateCrossings = useMemo(() => gateProfile ? vapourCrossingReaches(gateProfile) : [], [gateProfile]);
   const gateSummary = useMemo(() => gateProfile ? summariseProfile(gateProfile) : null, [gateProfile]);
   const runState = gateReport ? runAnalysisState(gateReport) : { available: false, reason: 'No gate report.' };
+  // D-6: the genuinely clean case closes itself after 3 s; anything else waits for a click (PLAN_S68 §4 6.6).
+  React.useEffect(() => {
+    if (!gateModalOpen || !gateReport || !modalAutoDismiss(gateReport)) return;
+    const t = setTimeout(() => setGateModalOpen(false), 3000);
+    return () => clearTimeout(t);
+  }, [gateModalOpen, gateReport]);
   const SCENARIO_LABEL: Record<Scenario, string> = {
     'pump-trip': 'Pump trip', 'pump-valve': 'Pump-fed + valve closure', 'gravity-valve': 'Gravity-fed + valve closure',
   };
@@ -656,7 +680,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100">
       {/* Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 min-h-16 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
               <Waves size={24} />
@@ -700,31 +724,15 @@ export default function App() {
             {/* ── The gate's status line — D-5b, moved OUT of the Reset Data button (D-5c) ──
                 It used to sit inside that button, so the row's gap-4 never applied ("Reset
                 DataGate — ..."). As its own sibling it gets the row's gap, beside the primary
-                button. On Screen 2 a blocked run states its reason here (PLAN_S68 §2 D4). */}
-            {view === 'gate' && gateReport && !runState.available ? (
-              <span className="text-xs font-bold text-red-600 max-w-[22rem]">{runState.reason}</span>
-            ) : gateCrash ? (
+                button. D-6: it prints the ruled pass/fail lines only — no codes, no log. */}
+            {gateCrash ? (
               <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate" title={gateCrash}>
                 Gate could not run
               </span>
             ) : gateReport ? (
-              <span
-                className="text-xs text-slate-500 whitespace-nowrap"
-                title={
-                  (gateReport.inputBlocked
-                    ? 'Stopped at the input checks, so the steady state was never computed.'
-                    : gateProfile
-                      ? `Steady state computed: ${gateProfile.nodes.length} nodes, ${gateProfile.reaches.length} reaches.`
-                      : 'No steady state was returned.')
-                  + (gateReport.reContractBlocked ? ' Reynolds contract reported.' : '')
-                  + (gateReport.stateError ? ` State phase threw: ${gateReport.stateError}` : '')
-                  + gateReport.blocking.map(f => `\n[${f.code}] ${f.where}: ${f.message}`).join('')
-                }
-              >
-                <span className="font-bold text-slate-600">Gate</span>
-                {` — ${gateReport.blocking.length} blocking, ${gateReport.advisory.length} advisory`}
-                {gateProfile ? ` · ${gateProfile.nodes.length} nodes` : ''}
-              </span>
+              <div data-gate-status className="text-[11px] leading-tight max-w-[24rem]">
+                <GateMessageView report={gateReport} />
+              </div>
             ) : null}
             {/* Screen 1: `Run Steady-State` evaluates the gate only (PLAN_S68 §2 D7).
                 Screen 2: `Run Analysis` runs today's handleRunSimulation unchanged, then returns
@@ -1469,7 +1477,6 @@ export default function App() {
           computes a head, a pressure, a margin, a velocity or a verdict. */}
       {view === 'gate' && gateReport && (() => {
         const mode = summaryMode(gateReport);
-        const b7 = failedB7(gateReport);
         const caveats = numberCaveats(gateReport);
         const s = gateSummary;
         // The ruled warnings (ANSWERS 2026-10-02 Q2), shown beside every place the numbers appear.
@@ -1502,7 +1509,7 @@ export default function App() {
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
                   {gateCrossings.map(r => (
                     <React.Fragment key={r.index}><ReferenceArea x1={r.startDistance} x2={r.endDistance} {...({ fill: '#ef4444', fillOpacity: 0.12 } as any) /* recharts 3 Props typing omits SVG fill in this setup */}
-                      label={b7 ? 'B7 — below vapour' : 'below vapour'} /></React.Fragment>
+                      label="below vapour" /></React.Fragment>
                   ))}
                   <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
@@ -1512,12 +1519,9 @@ export default function App() {
             </div>
           ) : (
             <p className="text-sm text-slate-500">
-              No steady state was computed{gateReport.stateError ? ` — the state phase threw: ${gateReport.stateError}` : ''}.
+              No steady state was computed.
             </p>
           )}
-          {b7 && b7.findings.map((f, i) => (
-            <p key={i} className="mt-3 text-xs text-red-700"><span className="font-bold">B7 · {f.where}:</span> {f.message}</p>
-          ))}
         </section>
 
         <aside className="w-[300px] shrink-0 space-y-4">
@@ -1547,33 +1551,40 @@ export default function App() {
           </section>
 
           <section data-rail="findings" className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-xs">
-            <h4 className="font-bold text-sm text-slate-700 mb-2">
-              Checks — {gateReport.blocking.length} blocking, {gateReport.advisory.length} advisory
-            </h4>
-            <ul className="space-y-2">
-              {gateReport.checks.map(c => {
-                const k = classifyCheck(c);
-                const st = CHECK_CLASS_STYLE[k];
-                return (
-                  <li key={c.code} data-check={c.code} data-class={k}>
-                    <div className={cn("flex gap-2 font-bold", st.cls)}>
-                      <span className="w-3">{st.mark}</span>
-                      <span>{c.code}</span>
-                      <span className="font-normal">{c.severity} · {c.verdict}</span>
-                    </div>
-                    {c.verdict === 'not-evaluated' && c.skipped && (
-                      <p className="ml-5 text-slate-400">{c.skipped}</p>
-                    )}
-                    {c.findings.map((f, i) => (
-                      <p key={i} className="ml-5 text-slate-600"><span className="font-semibold">{f.where}:</span> {f.message}</p>
-                    ))}
-                  </li>
-                );
-              })}
-            </ul>
+            <h4 className="font-bold text-sm text-slate-700 mb-2">System Check</h4>
+            <GateMessageView report={gateReport} />
           </section>
         </aside>
       </main>
+        );
+      })()}
+
+      {/* ── D-6: the gate modal (PLAN_S68.md §4-§5, MOCKUP_NOTES_S65.md §6-§7) ─────────────────
+          Opened by every `Run Steady-State`: gate 1 on Screen 1 when the input phase blocks, gate
+          2 on Screen 2 otherwise. Fail -> `Acknowledge & Return`, routed by `acknowledgeReturnTo`.
+          Pass with notes -> waits for `Continue`; genuinely clean -> also closes itself after 3 s.
+          It never runs anything: `Run Analysis` stays the only way to start the transient. */}
+      {gateModalOpen && gateReport && (() => {
+        const passed = gateReport.runAnalysisAvailable;
+        const close = () => {
+          setGateModalOpen(false);
+          if (!passed) setView(acknowledgeReturnTo(gateReport));
+        };
+        return (
+          <div data-gate-modal={passed ? 'pass' : 'fail'} className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 px-4">
+            <div role="dialog" aria-modal="true" className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-full max-w-md text-sm">
+              <GateMessageView report={gateReport} />
+              <div className="mt-5 flex justify-end">
+                <button
+                  onClick={close}
+                  className={cn("px-5 py-2 rounded-full font-semibold text-white",
+                    passed ? "bg-blue-600 hover:bg-blue-700" : "bg-red-600 hover:bg-red-700")}
+                >
+                  {passed ? 'Continue' : 'Acknowledge & Return'}
+                </button>
+              </div>
+            </div>
+          </div>
         );
       })()}
 
