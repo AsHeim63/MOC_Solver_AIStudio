@@ -528,13 +528,25 @@ export default function App() {
   const gateChart = useMemo(() => gateProfile ? buildGateChartData(gateProfile) : [], [gateProfile]);
   const gateCrossings = useMemo(() => gateProfile ? vapourCrossingReaches(gateProfile) : [], [gateProfile]);
   const gateSummary = useMemo(() => gateProfile ? summariseProfile(gateProfile) : null, [gateProfile]);
-  const runState = gateReport ? runAnalysisState(gateReport) : { available: false, reason: 'No gate report.' };
+  const runState = gateReport ? runAnalysisState(gateReport) : { available: false };
   // D-6: the genuinely clean case closes itself after 3 s; anything else waits for a click (PLAN_S68 §4 6.6).
   React.useEffect(() => {
     if (!gateModalOpen || !gateReport || !modalAutoDismiss(gateReport)) return;
     const t = setTimeout(() => setGateModalOpen(false), 3000);
     return () => clearTimeout(t);
   }, [gateModalOpen, gateReport]);
+  // D-6: the modal's one close action — its button (`Continue` / `Acknowledge & Return`) and the
+  // Escape key both call this, so the two can never route differently.
+  const closeGateModal = React.useCallback(() => {
+    setGateModalOpen(false);
+    if (gateReport && !gateReport.runAnalysisAvailable) setView(acknowledgeReturnTo(gateReport));
+  }, [gateReport]);
+  React.useEffect(() => {
+    if (!gateModalOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeGateModal(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [gateModalOpen, closeGateModal]);
   const SCENARIO_LABEL: Record<Scenario, string> = {
     'pump-trip': 'Pump trip', 'pump-valve': 'Pump-fed + valve closure', 'gravity-valve': 'Gravity-fed + valve closure',
   };
@@ -726,7 +738,7 @@ export default function App() {
                 DataGate — ..."). As its own sibling it gets the row's gap, beside the primary
                 button. D-6: it prints the ruled pass/fail lines only — no codes, no log. */}
             {gateCrash ? (
-              <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate" title={gateCrash}>
+              <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate">
                 Gate could not run
               </span>
             ) : gateReport ? (
@@ -1566,17 +1578,13 @@ export default function App() {
           It never runs anything: `Run Analysis` stays the only way to start the transient. */}
       {gateModalOpen && gateReport && (() => {
         const passed = gateReport.runAnalysisAvailable;
-        const close = () => {
-          setGateModalOpen(false);
-          if (!passed) setView(acknowledgeReturnTo(gateReport));
-        };
         return (
           <div data-gate-modal={passed ? 'pass' : 'fail'} className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 px-4">
             <div role="dialog" aria-modal="true" className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-full max-w-md text-sm">
               <GateMessageView report={gateReport} />
               <div className="mt-5 flex justify-end">
                 <button
-                  onClick={close}
+                  onClick={closeGateModal}
                   className={cn("px-5 py-2 rounded-full font-semibold text-white",
                     passed ? "bg-blue-600 hover:bg-blue-700" : "bg-red-600 hover:bg-red-700")}
                 >

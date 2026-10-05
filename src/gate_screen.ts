@@ -141,7 +141,7 @@ export function summaryMode(report: GateReport): SummaryMode {
     return report.steady ? 'numbers' : 'no-steady';
 }
 
-/** The B7 check, when it failed — its findings are shown verbatim beside the shaded reach. */
+/** The B7 check, when it failed (drives `isPartiallyFilled`; exported for the S70 harness, S2/S5). */
 export function failedB7(report: GateReport): GateCheck | undefined {
     return report.checks.find(c => c.code === 'B7' && c.verdict === 'fail');
 }
@@ -214,11 +214,16 @@ export interface GateMessage {
     /** Distinct problems, B1…B9 order. Empty when `passed`. */
     problems: string[];
     /**
-     * One "Note: ..." per advisory check that failed. One line per CHECK, not per finding, so there
-     * are at most five (A1…A5) — the ruled cap of 5 can never be exceeded and nothing is dropped.
+     * One distinct "Note: ..." per advisory check that failed, at most `MAX_NOTES` (enforced below,
+     * not only argued). The engine has five advisories (A1…A5), so today the cap never cuts. If it
+     * ever does, the first notes in check order are kept: which notes are "most significant" is not
+     * ruled (ANSWERS 2026-10-04 Q3), see LOOK-AT.
      */
     notes: string[];
 }
+
+/** Assaf's cap (ANSWERS 2026-10-04 Q3): at most 5 notes. */
+export const MAX_NOTES = 5;
 
 export function gateMessage(report: GateReport): GateMessage {
     const problems: string[] = [];
@@ -226,17 +231,20 @@ export function gateMessage(report: GateReport): GateMessage {
     for (const c of report.checks) {
         const k = classifyCheck(c);
         if (k === 'fail-blocking' && !problems.includes(PROBLEM_LINE[c.code])) problems.push(PROBLEM_LINE[c.code]);
-        if (k === 'fail-advisory') notes.push(`Note: ${PROBLEM_LINE[c.code]}`);
+        const note = `Note: ${PROBLEM_LINE[c.code]}`;
+        if (k === 'fail-advisory' && !notes.includes(note)) notes.push(note);
     }
     if (report.stateError !== undefined) problems.push(STEADY_FAILED_LINE);
     const passed = report.runAnalysisAvailable;
-    return { passed, problems: passed ? [] : problems, notes };
+    return { passed, problems: passed ? [] : problems, notes: notes.slice(0, MAX_NOTES) };
 }
 
-/** `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1); the reason is the ruled fail text. */
-export function runAnalysisState(report: GateReport): { available: boolean; reason: string } {
-    if (report.runAnalysisAvailable) return { available: true, reason: '' };
-    return { available: false, reason: `${GATE_FAIL_TITLE} ${gateMessage(report).problems.join('; ')}` };
+/**
+ * `Run Analysis` reads `runAnalysisAvailable` and nothing else (§1.1). It carries no reason text of
+ * its own: the user reads why through `gateMessage` (GateMessageView), the one source of that text.
+ */
+export function runAnalysisState(report: GateReport): { available: boolean } {
+    return { available: report.runAnalysisAvailable };
 }
 
 /**
