@@ -49,6 +49,7 @@ import { cn } from './lib/utils';
 import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
+import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -191,8 +192,12 @@ export default function App() {
   const [results, setResults] = useState<SimulationResults | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
 
-    // ── Step 3.7 scenario selector (S58) ──────────────────────────────────────
-  const [scenario, setScenario] = useState<Scenario>('pump-trip');
+    // ── Scenario control (Row 3.11 Unit C, D-7 — ruling R1) ───────────────────
+  // The control's state is the two-way radio plus the valve source; `scenario` is DERIVED from it
+  // through the one mapping in scenario_control.ts, never set directly.
+  const [operation, setOperation] = useState<Operation>('pump-operation');
+  const [valveSource, setValveSource] = useState<ValveSource>('pump');
+  const scenario: Scenario = scenarioFromControl(operation, valveSource);
   // Valve inputs (both valve scenarios). Defaults = REF-PAR reference closure (S50/S52-ratified):
   // Kv0 full-precision = (0.5/√30)·11493.9 (display convention "≈1049.3"); parabolic n=2,
   // t0=2 s, T_close=1 s; H_down=0; no check valve. Exponent 1 gives a linear closure.
@@ -968,15 +973,29 @@ export default function App() {
               <h2 className="font-bold text-sm uppercase tracking-wider">Scenario</h2>
             </div>
             <div className="space-y-3">
-              <select
-                value={scenario}
-                onChange={e => setScenario(e.target.value as Scenario)}
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-              >
-                <option value="pump-trip">Pump trip only (default)</option>
-                <option value="pump-valve">Pump-fed + valve closure</option>
-                <option value="gravity-valve">Gravity-fed + valve closure</option>
-              </select>
+              {/* Ruling R1: two-way radio + `Source` sub-choice on Valve-Operation. The state is
+                  (operation, valveSource); scenarioFromControl is the one mapping to a Scenario. */}
+              <div role="radiogroup" aria-label="Scenario type" className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+                {([['pump-operation', 'Pump-Operation'], ['valve-operation', 'Valve-Operation']] as [Operation, string][]).map(([v, label]) => (
+                  <label key={v} className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="scenario-operation" value={v} checked={operation === v}
+                      onChange={() => setOperation(v)} className="accent-blue-600" />
+                    <span className={operation === v ? 'font-semibold text-slate-800' : 'text-slate-600'}>{label}</span>
+                  </label>
+                ))}
+              </div>
+              {operation === 'valve-operation' && (
+                <div role="radiogroup" aria-label="Valve source" className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm pl-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Source:</span>
+                  {([['pump', 'Pump'], ['reservoir', 'Reservoir']] as [ValveSource, string][]).map(([v, label]) => (
+                    <label key={v} className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name="scenario-valve-source" value={v} checked={valveSource === v}
+                        onChange={() => setValveSource(v)} className="accent-blue-600" />
+                      <span className={valveSource === v ? 'font-semibold text-slate-800' : 'text-slate-600'}>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
               {scenario !== 'pump-trip' && (
                 <>
                   <div className="grid grid-cols-2 gap-3">
