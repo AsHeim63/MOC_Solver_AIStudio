@@ -12,12 +12,12 @@
 // SERIES-ONLY. Node-to-reach attribution assumes each reach's nodes are the contiguous range
 // firstNode..lastNode, which holds on a series main (BACKLOG: pipeIds/pipeParams pairing).
 
-import { VAPOR_HEAD_AT, GateCode } from './solver';
+import { VAPOR_HEAD_AT, GateCode, G } from './solver';
 import { GateCheck, GateReport } from './gate_checks';
 import { NodeRow, ReachRow, ProfileView } from './gate_view';
 
-/** Display-only unit factor: 1 m of water = rho*g/1e5 bar, rho = 1000 kg/m3, g = 9.81 (solver's G). */
-export const BAR_PER_M = 1000 * 9.81 / 1e5;
+/** Display-only unit factor: 1 m of water = rho*g/1e5 bar, rho = 1000 kg/m3, g = solver G. */
+export const BAR_PER_M = 1000 * G / 1e5;
 
 /** Display-only `toFixed` without a negative zero: a value that rounds to zero prints `0.00`, not `-0.00`. */
 export function fixedNoNegZero(x: number, digits: number): string {

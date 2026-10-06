@@ -89,7 +89,7 @@ export interface SimulationResults {
 // SECTION 1 — PHYSICAL CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const G           = 9.81;   // gravitational acceleration        [m/s²]
+export const G = 9.81;   // gravitational acceleration        [m/s²]
 const H_BARO      = 10.33;  // barometric pressure head          [m]
 const ALPHA_G0    = 1e-7;   // initial gas void fraction         [-]
 const VAPOR_H_REL = -9.8;   // vapor pressure, gauge above node  [m]
