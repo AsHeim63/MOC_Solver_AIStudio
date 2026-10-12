@@ -249,6 +249,10 @@ export default function App() {
     } catch { /* fall through to the default */ }
     return [{ Q: '', H: '' }, { Q: '', H: '' }, { Q: '', H: '' }];
   });
+  const setCurveCell = (i: number, key: 'Q' | 'H', value: string) =>
+    setCurveRows(curveRows.map((x, j) => j === i ? { ...x, [key]: value } : x));
+  // An empty cell is NaN (refused as "Invalid pump curve"), never 0.
+  const curveCell = (s: string) => s.trim() === '' ? NaN : Number(s);
   const [suctionPressure, setSuctionPressure] = useState(0);   // m of water, gauge (Q6-a)
 
 
@@ -471,11 +475,9 @@ export default function App() {
       gravity: scenario === 'gravity-valve'
         ? { head: inletPressure + sourceElevation, elevation: sourceElevation }
         : undefined,
-      // Q10: an empty cell is NaN (refused as "Invalid pump curve"), never 0.
+      // Q10: user pump curve, pump-fed valve only.
       pumpCurve: scenario === 'pump-valve'
-        ? { points: curveRows.map(r => ({ Q: r.Q.trim() === '' ? NaN : Number(r.Q),
-                                          H: r.H.trim() === '' ? NaN : Number(r.H) })),
-            suctionPressure }
+        ? { points: curveRows.map(r => ({ Q: curveCell(r.Q), H: curveCell(r.H) })), suctionPressure }
         : undefined,
     };
   };
@@ -1134,10 +1136,10 @@ export default function App() {
                     {curveRows.map((r, i) => (
                       <React.Fragment key={i}>
                         <input type="number" step="0.001" value={r.Q}
-                          onChange={e => setCurveRows(curveRows.map((x, j) => j === i ? { ...x, Q: e.target.value } : x))}
+                          onChange={e => setCurveCell(i, 'Q', e.target.value)}
                           className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-normal text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none" />
                         <input type="number" step="0.1" value={r.H}
-                          onChange={e => setCurveRows(curveRows.map((x, j) => j === i ? { ...x, H: e.target.value } : x))}
+                          onChange={e => setCurveCell(i, 'H', e.target.value)}
                           className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-normal text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none" />
                         <button type="button" aria-label="Remove point" title="Remove point"
                           onClick={() => setCurveRows(curveRows.filter((_, j) => j !== i))}

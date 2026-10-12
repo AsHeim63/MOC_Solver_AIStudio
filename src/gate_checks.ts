@@ -248,12 +248,16 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
     let stateError: string | undefined;
     /** Set by the mesh collector when the Reynolds contract guard reports. Bounds A1 below. */
     let reContractBlocked = false;
-
-    if (inputBlocked) {
-        const why = 'an input-phase check blocks — no steady state was computed';
+    /** The state-phase checks, skipped with one reason when there is no steady state to check. */
+    const skipStateChecks = (why: string) => {
         for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5','A7'] as GateCode[]) {
             if (!acc.has(c) && !skipped.has(c)) skip(c, why);
         }
+    };
+
+    if (inputBlocked) {
+        const why = 'an input-phase check blocks — no steady state was computed';
+        skipStateChecks(why);
     } else {
         try {
             // The collector is what turns the ONE guard that fires mid-mesh into a report: supplied,
@@ -293,9 +297,7 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
             const why = stateError
                 ? 'the steady-state calculation could not complete'
                 : 'no steady state was returned';
-            for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5','A7'] as GateCode[]) {
-                if (!acc.has(c) && !skipped.has(c)) skip(c, why);
-            }
+            skipStateChecks(why);
         }
     }
 
