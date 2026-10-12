@@ -10,6 +10,9 @@ export interface PumpCurvePoint { Q: number; H: number; }
 /** DC-11 named constants (DOMAIN §15 (vi)). */
 export const PUMP_CURVE_MIN_POINTS = 3;
 export const PUMP_CURVE_FIT_MAX_RESIDUAL_FRAC = 0.05;
+/** Hump test tolerance: b·Qmax ≤ this × |c| is floating-point noise, not a hump (Q10 fix round, P4).
+ *  Over the entered range such a slope term moves the head by at most 1e-9 of the shut-off head. */
+export const PUMP_CURVE_HUMP_TOL_FRAC = 1e-9;
 
 export type PumpCurveFit =
     | { ok: true; curve: PumpCurveCoefs; humpRemoved: boolean }
@@ -17,9 +20,10 @@ export type PumpCurveFit =
 
 /**
  * Fit H = a·Q² + b·Q + c to the entered points (rulings Q6-c, Q6-d, Q6-g; plan §5).
- * Exactly 3 points: exact parabola. More: least squares on x = Q/Qmax. Hump (b > 0): refit with
- * b = 0 (closest no-hump curve). Then a < 0, c > 0, head rise > 0 at every entered Q, and — for
- * more than 3 points or a hump refit — every point within 5 % of c of the curve.
+ * Exactly PUMP_CURVE_MIN_POINTS points: exact parabola. More: least squares on x = Q/Qmax.
+ * b > 0: refit with b = 0 (closest no-hump curve); `humpRemoved` (the A6 note) only when b is above
+ * the noise tolerance. The coefficient rule (a < 0, b ≤ 0, c > 0) is NOT here: it is the solver's
+ * `FIND_PUMP_CURVE` (one definition, L147), then `pumpCurveFitFault` checks the points against it.
  */
 export function fitPumpCurve(points: PumpCurvePoint[]): PumpCurveFit {
     if (points.length < PUMP_CURVE_MIN_POINTS) return { ok: false, reason: `fewer than ${PUMP_CURVE_MIN_POINTS} points` };
@@ -31,19 +35,27 @@ export function fitPumpCurve(points: PumpCurvePoint[]): PumpCurveFit {
     if (new Set(points.map(p => p.Q)).size < PUMP_CURVE_MIN_POINTS) {
         return { ok: false, reason: `fewer than ${PUMP_CURVE_MIN_POINTS} different flows` };
     }
-    let curve = points.length === 3 ? exactParabola(points) : leastSquares(points, true);
-    const humpRemoved = curve.b > 0;
-    if (humpRemoved) curve = leastSquares(points, false);
-    if (!(curve.a < 0) || !(curve.b <= 0) || !(curve.c > 0) || ![curve.a, curve.b, curve.c].every(Number.isFinite)) {
-        return { ok: false, reason: 'the fitted curve does not fall with flow' };
-    }
-    const h = (q: number) => curve.a * q * q + curve.b * q + curve.c;
-    if (points.length > 3 || humpRemoved) {
-        const worst = Math.max(...points.map(p => Math.abs(p.H - h(p.Q))));
-        if (worst > PUMP_CURVE_FIT_MAX_RESIDUAL_FRAC * curve.c) return { ok: false, reason: 'a point is off the curve by more than 5 % of the shut-off head' };
-    }
-    if (!points.every(p => h(p.Q) > 0)) return { ok: false, reason: 'the curve head is zero or negative at an entered flow' };
+    let curve = points.length === PUMP_CURVE_MIN_POINTS ? exactParabola(points) : leastSquares(points, true);
+    const Qm = Math.max(...points.map(p => p.Q));
+    const humpRemoved = curve.b * Qm > PUMP_CURVE_HUMP_TOL_FRAC * Math.abs(curve.c);
+    if (curve.b > 0) curve = leastSquares(points, false);
     return { ok: true, curve, humpRemoved };
+}
+
+/**
+ * The fitted curve against the entered points, once `FIND_PUMP_CURVE` has accepted it: every point
+ * within PUMP_CURVE_FIT_MAX_RESIDUAL_FRAC of c of the curve (an exact parabola has residual 0, so the
+ * test is run on every fit), and head rise > 0 at every entered Q. Returns the refusal reason or
+ * undefined.
+ */
+export function pumpCurveFitFault(points: PumpCurvePoint[], curve: PumpCurveCoefs): string | undefined {
+    const h = (q: number) => curve.a * q * q + curve.b * q + curve.c;
+    const worst = Math.max(...points.map(p => Math.abs(p.H - h(p.Q))));
+    if (worst > PUMP_CURVE_FIT_MAX_RESIDUAL_FRAC * curve.c) {
+        return `a point is off the curve by more than ${PUMP_CURVE_FIT_MAX_RESIDUAL_FRAC * 100} % of the shut-off head`;
+    }
+    if (!points.every(p => h(p.Q) > 0)) return 'the curve head is zero or negative at an entered flow';
+    return undefined;
 }
 
 /** Newton divided differences through exactly three points with distinct Q. */

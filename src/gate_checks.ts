@@ -174,12 +174,14 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
     // First-finding semantics is theirs, and it is deliberate: with no valve settings there is no
     // coefficient to convert and no boundary to resolve, so continuing would report faults derived
     // from absent inputs. Its findings carry codes B1 / B8 / B4 / B5 already, so they route by code.
-    for (const f of FIND_SCENARIO_INPUTS(scenario, inputs)) add(f);
+    // Q10: it also reports B11/B10 as skipped when an earlier return means they never ran (S67).
+    for (const f of FIND_SCENARIO_INPUTS(scenario, inputs, skip)) add(f);
 
     // Q10: B10/B11 arrive from FIND_SCENARIO_INPUTS above. A6 is the hump refit note (Q6-c).
     if (curveIn) {
         const fit = fitPumpCurve(curveIn.points ?? []);
-        if (fit.ok && fit.humpRemoved) add(finding('A6', 'tool-limit', 'Pump curve',
+        if (!fit.ok) skip('A6', 'the pump curve could not be fitted — see the finding above');
+        else if (fit.humpRemoved) add(finding('A6', 'tool-limit', 'Pump curve',
             'Pump curve hump removed: the entered points rise with flow; the closest curve without a ' +
             'hump is used.'));
     } else {

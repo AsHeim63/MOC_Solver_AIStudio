@@ -32,9 +32,9 @@ import {
     PipeSection, PumpParams, ReservoirParams,
     ValveParams, ClosureLaw, SimulationResults,
     GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
-    PumpCurve, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0
+    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0
 } from './solver';
-import { fitPumpCurve, PumpCurvePoint } from './pump_curve';
+import { fitPumpCurve, pumpCurveFitFault, PumpCurvePoint } from './pump_curve';
 
 export type Scenario = 'pump-trip' | 'pump-valve' | 'gravity-valve';
 
@@ -184,21 +184,31 @@ function pumpCurveOf(inputs: DispatchInputs): PumpCurve | undefined {
  * trip through H_suct − Z0 can land 1 ULP either side); the solver repeats it on H_suct − Z0.
  * The duty point runs only when its other inputs are sound — those faults are reported by their
  * own checks (B1/B6/B8), and a duty-point finding derived from them would blame the curve.
+ * The coefficient rule is the solver's `FIND_PUMP_CURVE` (one gate, two layers, L147).
+ * `notReached` hears B11/B10 when an early return means they never ran (S67: skipped, not pass).
  */
-function FIND_PUMP_CURVE_INPUTS(inputs: DispatchInputs, v: SelectorValveInput): GateFinding[] {
+function FIND_PUMP_CURVE_INPUTS(inputs: DispatchInputs, v: SelectorValveInput,
+                                notReached?: (code: GateCode, why: string) => void): GateFinding[] {
     const pc = inputs.pumpCurve!;
     const sp = pc.suctionPressure;
     if (typeof sp !== 'number' || !Number.isFinite(sp)) {
+        const why = 'the suction pressure is not a finite number — see the finding above';
+        notReached?.('B11', why); notReached?.('B10', why);
         return [GATE_FINDING('B1', 'contract-violation', 'Suction pressure',
             `Suction pressure is ${sp}. It must be a finite number (m of water, gauge).`)];
     }
     if (!(sp > VAPOR_PRESSURE_GAUGE_M)) {
+        notReached?.('B10', 'the suction pressure is too low, so the curve was not checked');
         return [GATE_FINDING('B11', 'contract-violation', 'Suction pressure',
             `Suction pressure too low: ${sp} m is at or below vapour pressure (${VAPOR_PRESSURE_GAUGE_M} m).`)];
     }
     const fit = fitPumpCurve(pc.points ?? []);
     if ('reason' in fit) return [GATE_FINDING('B10', 'contract-violation', 'Pump curve', `Invalid pump curve: ${fit.reason}.`)];
     const curve = pumpCurveOf(inputs)!;
+    const bad = FIND_PUMP_CURVE(curve);
+    if (bad.length) return bad;
+    const fault = pumpCurveFitFault(pc.points, fit.curve);
+    if (fault) return [GATE_FINDING('B10', 'contract-violation', 'Pump curve', `Invalid pump curve: ${fault}.`)];
     const Z0 = inputs.pump?.elevation;
     const Cv0 = toSolverCv0(v.coefficient);
     const pipesOk = inputs.pipes.length > 0 && inputs.pipes.every(p =>
@@ -244,16 +254,25 @@ export type ScenarioArgs =
  * wording, ON PURPOSE (L147): one gate at two layers, because a direct solver caller bypasses this
  * one entirely. Both are B5 evidence and the engine must not merge them into one message.
  */
-export function FIND_SCENARIO_INPUTS(scenario: Scenario, inputs: DispatchInputs): GateFinding[] {
+export function FIND_SCENARIO_INPUTS(scenario: Scenario, inputs: DispatchInputs,
+                                    notReached?: (code: GateCode, why: string) => void): GateFinding[] {
     if (scenario === 'pump-trip') return [];
 
     const v = inputs.valve;
     if (scenario === 'pump-valve') {
-        if (!v) return [GATE_FINDING('B1', 'contract-violation', 'Valve settings',
-            'The pump-fed valve-closure scenario needs valve settings.')];
+        // Q10: the curve checks come last; an earlier return means B11/B10 never ran (S67).
+        const curveNotReached = (why: string) => {
+            if (inputs.pumpCurve) { notReached?.('B11', why); notReached?.('B10', why); }
+        };
+        if (!v) {
+            curveNotReached('there are no valve settings — see the finding above');
+            return [GATE_FINDING('B1', 'contract-violation', 'Valve settings',
+                'The pump-fed valve-closure scenario needs valve settings.')];
+        }
         const boundary = FIND_DOWNSTREAM_BOUNDARY(v, inputs.pipes);
+        if (boundary.length) curveNotReached('the downstream boundary could not be resolved — see the finding above');
         if (boundary.length || !inputs.pumpCurve) return boundary;
-        return FIND_PUMP_CURVE_INPUTS(inputs, v);   // Q10
+        return FIND_PUMP_CURVE_INPUTS(inputs, v, notReached);   // Q10
     }
 
     // gravity-valve

@@ -245,7 +245,11 @@ export default function App() {
   const [curveRows, setCurveRows] = useState<{ Q: string; H: string }[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('hg_pump_curve') ?? 'null');
-      if (Array.isArray(saved)) return saved;
+      // Every stored row must be { Q: string, H: string }; anything else falls back to the default.
+      if (Array.isArray(saved) && saved.every(r => r !== null && typeof r === 'object' &&
+                                               typeof r.Q === 'string' && typeof r.H === 'string')) {
+        return saved;
+      }
     } catch { /* fall through to the default */ }
     return [{ Q: '', H: '' }, { Q: '', H: '' }, { Q: '', H: '' }];
   });
@@ -253,7 +257,16 @@ export default function App() {
     setCurveRows(curveRows.map((x, j) => j === i ? { ...x, [key]: value } : x));
   // An empty cell is NaN (refused as "Invalid pump curve"), never 0.
   const curveCell = (s: string) => s.trim() === '' ? NaN : Number(s);
-  const [suctionPressure, setSuctionPressure] = useState(0);   // m of water, gauge (Q6-a)
+  // m of water, gauge (Q6-a). Kept as typed, like the curve cells: an emptied field is NaN
+  // (refused as a non-finite suction pressure), never 0.
+  const [suctionText, setSuctionText] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('hg_suction_pressure');
+      if (saved !== null) return saved;
+    } catch { /* fall through to the default */ }
+    return '0';
+  });
+  const suctionPressure = curveCell(suctionText);
 
 
   // Persistence Effects
@@ -268,6 +281,10 @@ export default function App() {
   React.useEffect(() => {
     try { localStorage.setItem('hg_pump_curve', JSON.stringify(curveRows)); } catch { /* not persisted */ }
   }, [curveRows]);
+
+  React.useEffect(() => {
+    try { localStorage.setItem('hg_suction_pressure', suctionText); } catch { /* not persisted */ }
+  }, [suctionText]);
 
   // The downstream tank is no longer stored, and the old key is actively removed rather than
   // left to rot: it holds an ELEVATION under a name this app no longer has a field for, and
@@ -1124,8 +1141,8 @@ export default function App() {
                   <input
                     type="number"
                     step="0.1"
-                    value={suctionPressure}
-                    onChange={e => setSuctionPressure(Number(e.target.value))}
+                    value={suctionText}
+                    onChange={e => setSuctionText(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
                 </div>
