@@ -34,6 +34,7 @@ import {
     Scenario, DispatchInputs, SelectorValveInput, dispatchSteadyState,
     toSolverCv0, resolveHDown, FIND_SCENARIO_INPUTS,
 } from './scenario_dispatch';
+import { fitPumpCurve } from './pump_curve';
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // The report shape
@@ -58,7 +59,7 @@ export interface GateCheck {
 }
 
 export interface GateReport {
-    /** All fourteen, always, in B1…B9 then A1…A5 order — §4 requires the checks to be LISTED. */
+    /** All eighteen, always, in B1…B11 then A1…A7 order — §4 requires the checks to be LISTED. */
     checks: GateCheck[];
     blocking: GateFinding[];
     advisory: GateFinding[];
@@ -105,8 +106,8 @@ export interface GateReport {
     stateError?: string;
 }
 
-const BLOCKING_ORDER: GateCode[] = ['B1','B2','B3','B4','B5','B6','B7','B8','B9'];
-const ADVISORY_ORDER: GateCode[] = ['A1','A2','A3','A4','A5'];
+const BLOCKING_ORDER: GateCode[] = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11'];
+const ADVISORY_ORDER: GateCode[] = ['A1','A2','A3','A4','A5','A6','A7'];
 
 /** One place builds a finding, so `severity` is never passed by hand (D5). */
 function finding(code: GateCode, kind: GateKind, where: string, message: string): GateFinding {
@@ -164,6 +165,8 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
     const isValve   = scenario === 'pump-valve' || scenario === 'gravity-valve';
     const isGravity = scenario === 'gravity-valve';
     const v = inputs.valve;
+    // Q10: the user pump curve exists on the pump-fed valve path only (ignored elsewhere).
+    const curveIn = scenario === 'pump-valve' ? inputs.pumpCurve : undefined;
 
     // ── INPUT PHASE ─────────────────────────────────────────────────────────────────────────────
 
@@ -172,6 +175,16 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
     // coefficient to convert and no boundary to resolve, so continuing would report faults derived
     // from absent inputs. Its findings carry codes B1 / B8 / B4 / B5 already, so they route by code.
     for (const f of FIND_SCENARIO_INPUTS(scenario, inputs)) add(f);
+
+    // Q10: B10/B11 arrive from FIND_SCENARIO_INPUTS above. A6 is the hump refit note (Q6-c).
+    if (curveIn) {
+        const fit = fitPumpCurve(curveIn.points ?? []);
+        if (fit.ok && fit.humpRemoved) add(finding('A6', 'tool-limit', 'Pump curve',
+            'Pump curve hump removed: the entered points rise with flow; the closest curve without a ' +
+            'hump is used.'));
+    } else {
+        for (const c of ['B10','B11','A6','A7'] as GateCode[]) skip(c, 'no pump curve was entered');
+    }
 
     checkB8(inputs.pipes, add);
     checkB1(scenario, inputs, add);
@@ -238,8 +251,8 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
 
     if (inputBlocked) {
         const why = 'an input-phase check blocks — no steady state was computed';
-        for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5'] as GateCode[]) {
-            if (!acc.has(c)) skip(c, why);
+        for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5','A7'] as GateCode[]) {
+            if (!acc.has(c) && !skipped.has(c)) skip(c, why);
         }
     } else {
         try {
@@ -270,12 +283,18 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
                                                  isGravity ? 'gravity' : 'pump')) add(f);
             // A1 must not contradict the Reynolds guard's own verdict — see checkAdvisories.
             checkAdvisories(steady, inputs, v, add, reContractBlocked);
+            // Q10: A7 — duty point outside the entered flow range (Q6-e; both sides, builder's pick).
+            if (curveIn) {
+                const Qs = curveIn.points.map(p => p.Q), Q0 = steady.pump.initialFlow;
+                if (Q0 < Math.min(...Qs) || Q0 > Math.max(...Qs)) add(finding('A7', 'tool-limit',
+                    'Pump curve', `Duty point outside pump curve: Q0 = ${Q0} m3/s is outside the entered flows.`));
+            }
         } else {
             const why = stateError
                 ? 'the steady-state calculation could not complete'
                 : 'no steady state was returned';
-            for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5'] as GateCode[]) {
-                if (!acc.has(c)) skip(c, why);
+            for (const c of ['B2','B3','B7','A1','A2','A3','A4','A5','A7'] as GateCode[]) {
+                if (!acc.has(c) && !skipped.has(c)) skip(c, why);
             }
         }
     }
@@ -382,8 +401,11 @@ function checkB1(scenario: Scenario, inputs: DispatchInputs, add: (f: GateFindin
 
     // The gravity path DERIVES its flow, so `pump.initialFlow` is only a required entry on the two
     // pump-fed scenarios; on gravity it is a carrier field the solver overwrites (§1.4 note 2).
+    // Q10 (plan §4, F6): with a user curve the pump-fed valve flow is DERIVED too, so "Starting
+    // flow" and its sign test apply to pump trip, and to pump-valve only without a curve.
+    const flowEntered = scenario === 'pump-trip' || (scenario === 'pump-valve' && !inputs.pumpCurve);
     if (scenario !== 'gravity-valve') {
-        req('Starting flow',    'Starting flow',        inputs.pump?.initialFlow);
+        if (flowEntered) req('Starting flow', 'Starting flow', inputs.pump?.initialFlow);
         req('Pump elevation',   'Pump elevation',       inputs.pump?.elevation);
 
         // ── The sign test (Row 3.11 Unit C, D-3 — S68) ──────────────────────────────────────────
@@ -419,7 +441,7 @@ function checkB1(scenario: Scenario, inputs: DispatchInputs, add: (f: GateFindin
         // `Number.isFinite` test also keeps this disjoint from `req()` above, so a NaN flow is
         // reported once, as non-finite, and never twice.
         const Q0 = inputs.pump?.initialFlow;
-        if (typeof Q0 === 'number' && Number.isFinite(Q0) && Q0 < 0) {
+        if (flowEntered && typeof Q0 === 'number' && Number.isFinite(Q0) && Q0 < 0) {
             add(finding('B1', 'contract-violation', 'Starting flow',
                 `Starting flow is ${Q0} m3/s. This scenario initialises forward flow only, so a ` +
                 `negative value cannot describe the system being set up. Enter the flow as a ` +

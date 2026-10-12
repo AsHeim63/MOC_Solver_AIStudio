@@ -239,6 +239,18 @@ export default function App() {
   // conventions R2 removed: they can be set to disagree, and nothing said which won.
   const [sourceElevation, setSourceElevation] = useState(0);
 
+  // ── Q10: user pump curve (pump-fed valve only) ───────────────────────────────────────────
+  // Points as typed (strings, so a cell can be empty); SI as today (m³/s, m) until Q8 adds units.
+  // Three empty rows by default: the curve is the user's data, like the profile.
+  const [curveRows, setCurveRows] = useState<{ Q: string; H: string }[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('hg_pump_curve') ?? 'null');
+      if (Array.isArray(saved)) return saved;
+    } catch { /* fall through to the default */ }
+    return [{ Q: '', H: '' }, { Q: '', H: '' }, { Q: '', H: '' }];
+  });
+  const [suctionPressure, setSuctionPressure] = useState(0);   // m of water, gauge (Q6-a)
+
 
   // Persistence Effects
   React.useEffect(() => {
@@ -248,6 +260,10 @@ export default function App() {
   React.useEffect(() => {
     localStorage.setItem('hg_pump', JSON.stringify(pump));
   }, [pump]);
+
+  React.useEffect(() => {
+    try { localStorage.setItem('hg_pump_curve', JSON.stringify(curveRows)); } catch { /* not persisted */ }
+  }, [curveRows]);
 
   // The downstream tank is no longer stored, and the old key is actively removed rather than
   // left to rot: it holds an ELEVATION under a name this app no longer has a field for, and
@@ -454,6 +470,12 @@ export default function App() {
       },
       gravity: scenario === 'gravity-valve'
         ? { head: inletPressure + sourceElevation, elevation: sourceElevation }
+        : undefined,
+      // Q10: an empty cell is NaN (refused as "Invalid pump curve"), never 0.
+      pumpCurve: scenario === 'pump-valve'
+        ? { points: curveRows.map(r => ({ Q: r.Q.trim() === '' ? NaN : Number(r.Q),
+                                          H: r.H.trim() === '' ? NaN : Number(r.H) })),
+            suctionPressure }
         : undefined,
     };
   };
@@ -1093,7 +1115,43 @@ export default function App() {
             </div>
             
             <div className="space-y-4">
+              {scenario === 'pump-valve' && (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Suction Pressure (m)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={suctionPressure}
+                    onChange={e => setSuctionPressure(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Pump Curve</label>
+                  <div className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    <span>Flow (m³/s)</span><span>Head (m)</span><span className="w-6" />
+                    {curveRows.map((r, i) => (
+                      <React.Fragment key={i}>
+                        <input type="number" step="0.001" value={r.Q}
+                          onChange={e => setCurveRows(curveRows.map((x, j) => j === i ? { ...x, Q: e.target.value } : x))}
+                          className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-normal text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                        <input type="number" step="0.1" value={r.H}
+                          onChange={e => setCurveRows(curveRows.map((x, j) => j === i ? { ...x, H: e.target.value } : x))}
+                          className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-normal text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                        <button type="button" aria-label="Remove point" title="Remove point"
+                          onClick={() => setCurveRows(curveRows.filter((_, j) => j !== i))}
+                          className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-red-500">×</button>
+                      </React.Fragment>
+                    ))}
+                  </div>
+                  <button type="button" onClick={() => setCurveRows([...curveRows, { Q: '', H: '' }])}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700">+ Add point</button>
+                </div>
+              </>
+              )}
               <div className="grid grid-cols-2 gap-3">
+                {scenario === 'pump-trip' && (
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Initial Flow (m³/s)</label>
                   <input
@@ -1104,6 +1162,7 @@ export default function App() {
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                   />
                 </div>
+                )}
                 {scenario === 'pump-trip' && (
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trip Time (s)</label>
@@ -1562,6 +1621,10 @@ export default function App() {
             {mode === 'numbers' && s ? (
               <>
                 {caveatBox}
+                {gateReport.steady?.pump.curve && (
+                  <div data-duty-point className="flex justify-between gap-2"><span className="text-slate-500">Duty point</span>
+                    <span className="font-mono">{gateReport.steady.pump.initialFlow.toFixed(4)} m³/s · {(gateReport.steady.init.prevState.H[0] - gateReport.steady.pump.curve.H_suct).toFixed(2)} m</span></div>
+                )}
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Flow</span>
                   <span className="font-mono">{s.flow.toFixed(4)} m³/s ({(s.flow * 3600).toFixed(1)} m³/h)</span></div>
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Velocity</span>

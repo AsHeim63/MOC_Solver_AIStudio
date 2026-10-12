@@ -29,6 +29,9 @@
 //                                    miabState updated
 //                                    prevState ← newState
 
+// Q10: user pump curve helpers (pure, SI). DOMAIN §15.
+import { pumpRunOutFlow, pumpFlowAtHeadRise } from './pump_curve';
+
 // ── Inlined from types.ts ────────────────────────────────────────────────────
 export interface PipeSection {
     id:            string;
@@ -45,7 +48,13 @@ export interface PumpParams {
     tripTime:    number;   // s  (start of deceleration)
     haltTime:    number;   // s  (fully stopped)
     elevation:   number;   // m  (pump discharge elevation)
+    /** Q10: user pump curve (SI: a m/(m³/s)², b m/(m³/s), c m, H_suct m). Pump-fed valve path only
+     *  (PREPARE_valve with tripTime = haltTime = Infinity); absent = today's 1.33 curve. DOMAIN §15. */
+    curve?:      PumpCurve;
 }
+
+/** Q10: H_rise = a·Q² + α·b·Q + α²·c; discharge head = H_suct + H_rise. DOMAIN §15 (i). */
+export interface PumpCurve { a: number; b: number; c: number; H_suct: number; }
 
 export interface ReservoirParams {
     head: number;   // m  (water surface elevation)
@@ -1110,6 +1119,13 @@ function CALC_BC_PUMP_DGCM(
         // (newFlow.setQin/setQout). No Newton, no pumpGasCavityActive flag.
         // Single deterministic H_liq >= H_vap regime decision (DOMAIN §5 / Bug #8).
         //
+        // Q10: a user curve takes its own branch (SECTION 7c.1); without one, everything below is
+        // unchanged byte for byte (pump trip, no-curve pump-fed valve, Q6-f).
+        if (pump.curve !== undefined) {
+            CALC_BC_PUMP_CURVE(idx, coefs, prevState, newState, newFlow, grid, pump.curve, alpha, pipe);
+            return;
+        }
+        //
         //   Step 1 — Liquid solution: k_pump·Q² + B·Q + (Cm − α²·Hs) = 0, take Q >= 0.
         //   Step 2 — Regime: H_liq >= H_vap → LIQUID (H = H_liq, V_g reset to 1e-12);
         //            else → CAVITATION (H pinned at H_vap; DGCM mass balance on V_g).
@@ -1167,6 +1183,83 @@ function CALC_BC_PUMP_DGCM(
         newState.V_g[idx]   = V_g;
         newState.C_gas[idx] = C_gas_new;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 7c.1 — CALC_BC_PUMP_CURVE  (user pump curve, running branch — Q10, DOMAIN §15)
+// ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Running branch of CALC_BC_PUMP_DGCM when `pump.curve` is set. Same v7 single-pass shape (no
+ * Newton, DOMAIN §5/§8, L098), with the Q6-h three-way pump flow rule (DOMAIN §15 (ix)):
+ *   Cm + B·Q_r ≤ H_suct      → Q = Q_r (run-out, head rise ≤ 0), H = Cm + B·Q_r
+ *   Cm ≥ H_suct + α²·c       → Q = 0 (check valve shut, §15 (xi)), H = Cm
+ *   otherwise                → (−a)·Q² + P·Q − R = 0, Q = 2R/(P + sqrt(P² + 4(−a)R)), H = Cm + B·Q
+ * Q is continuous across both switches. Then H ≥ H_vap → liquid; else cavitation at H_vap with
+ * Q_in = Q_pump(H_vap − H_suct) and the DGCM mass balance exactly as SECTION 7c's running branch.
+ * Never stops the run (§15 (x)).
+ */
+function CALC_BC_PUMP_CURVE(
+    idx:       number,
+    coefs:     CharCoefs,
+    prevState: SystemState,
+    newState:  SystemState,
+    newFlow:   FlowState,
+    grid:      GridParams,
+    curve:     PumpCurve,
+    alpha:     number,
+    pipe:      PipeParams
+): void {
+    const B         = coefs.B2;
+    const Cm        = coefs.Cm;
+    const dt        = grid.dt;
+    const C_gas     = prevState.C_gas[idx];
+    const V_g_old   = prevState.V_g[idx];
+    const V_max     = pipe.dx * pipe.A;
+    const H_vap     = prevState.Z[idx] + VAPOR_H_REL;
+    const H_abs_vap = H_BARO + VAPOR_H_REL;
+    const H_suct    = curve.H_suct;
+    const shutOff   = alpha * alpha * curve.c;
+    const Q_r       = pumpRunOutFlow(curve, alpha);
+
+    // ── Step 1: liquid solution (user curve + C−), three-way rule ──────────────
+    let Q_liq: number;
+    if (Cm + B * Q_r <= H_suct) {
+        Q_liq = Q_r;                                  // run-out (Δ ≤ 0)
+    } else if (Cm >= H_suct + shutOff) {
+        Q_liq = 0.0;                                  // check valve shut (Δ ≥ α²·c)
+    } else {
+        const P = B - alpha * curve.b;                // > 0 (b ≤ 0)
+        const R = H_suct + shutOff - Cm;              // > 0 in this case
+        Q_liq = 2.0 * R / (P + Math.sqrt(P * P + 4.0 * (-curve.a) * R));
+    }
+    const H_liq = Cm + B * Q_liq;
+
+    if (H_liq >= H_vap) {
+        // ── LIQUID: as SECTION 7c running branch ───────────────────────────────
+        newState.H[idx]     = H_liq;
+        newFlow.setQin(idx, Q_liq);                   // pump face (qPumpFace)
+        newFlow.setQout(idx, (H_liq - Cm) / B);       // cavity↔pipe face = Q_liq ≥ 0
+        newState.V_g[idx]   = 1e-12;
+        newState.C_gas[idx] = C_gas;
+        return;
+    }
+
+    // ── CAVITATION: H pinned at H_vap; pump flow by the Q6-h rule ─────────────
+    const Q_in_vap  = pumpFlowAtHeadRise(curve, alpha, H_vap - H_suct);
+    const Q_out_vap = (H_vap - Cm) / B;               // SIGNED (DOMAIN §6)
+    let V_g = V_g_old + dt * (Q_out_vap - Q_in_vap);  // DC-4 net-outflow
+    let C_gas_new = C_gas;
+    if (V_g <= 1e-12) {
+        V_g = 1e-12;
+    } else {
+        if (V_g > V_max) V_g = V_max;
+        C_gas_new = H_abs_vap * V_g;                  // gas constant locked to vapor-floor state
+    }
+    newState.H[idx]     = H_vap;
+    newFlow.setQin(idx, Q_in_vap);
+    newFlow.setQout(idx, Q_out_vap);
+    newState.V_g[idx]   = V_g;
+    newState.C_gas[idx] = C_gas_new;
 }
 
 // ── 7d: Reservoir boundary (right end, last node) ────────────────────────────
@@ -2116,6 +2209,12 @@ export function PREPARE_pump(
     collect?:   (f: GateFinding) => void   // S67 D2 — see meshNetwork; omitted ⟹ guards throw
 ): SteadyStateResult {
     trace?.(PREPARE_pump.name);   // §8.3(a) seam: proves the gate and the run enter the SAME function
+    // Q10 (plan §5 P2, Q6-f): a user curve is REFUSED on pump trip, never ignored — ignored, the
+    // 1.33 curve would run silently in its place.
+    if (pump.curve !== undefined) {
+        throw new Error('runWaterHammerSimulation: a user pump curve applies to the pump-fed valve ' +
+                        'closure only; pump trip keeps the built-in curve.');
+    }
     // ── 10a: Network meshing (Phase 2.5.3 / I3 — spec §3a.1–§3a.6) ─────────────
     // The ordered PipeSection[] routes through the legacy adapter (legacyToNetwork) and the
     // graph mesher (meshNetwork, Section 9.5). For the linear chain the mesh reduces
@@ -2664,6 +2763,13 @@ export function PREPARE_valve(
     // floating-point precision (algebraically exact; ~1e-14 FP noise via sqrt→div→square).
     // Step 3.12 / S63: input contract before the first use of valve.Cv0. SECTION 9.8.
     ASSERT_VALVE_CV0(valve.Cv0, 'runWaterHammerSimulationValve');
+    // Q10: with a user curve the steady flow comes from the curve (DOMAIN §15 (iv)); `pump` becomes
+    // a copy carrying the derived Q0. Contract asserts first (SECTION 9.11). No curve: unchanged.
+    if (pump.curve !== undefined) {
+        ASSERT_PUMP_CURVE(pump, 'runWaterHammerSimulationValve');
+        pump = { ...pump, initialFlow: ASSERT_PUMP_DUTY_POINT(inputPipes, pump.curve, valve, pump.elevation,
+                                                             'runWaterHammerSimulationValve') };
+    }
 
     const Q0 = pump.initialFlow;
     const H_valve_steady = valve.H_down + (Q0 / valve.Cv0) * (Q0 / valve.Cv0);
@@ -3083,7 +3189,9 @@ export type GateKind = 'contract-violation' | 'tool-limit';
 
 export type GateCode =
     'B1' | 'B2' | 'B3' | 'B4' | 'B5' | 'B6' | 'B7' | 'B8' | 'B9' |
-    'A1' | 'A2' | 'A3' | 'A4' | 'A5';
+    'B10' | 'B11' |   // Q10: invalid pump curve | suction pressure too low (internal codes, never shown)
+    'A1' | 'A2' | 'A3' | 'A4' | 'A5' |
+    'A6' | 'A7';      // Q10: pump curve hump removed | duty point outside pump curve
 
 export interface GateFinding {
     code:     GateCode;
@@ -3224,6 +3332,103 @@ export function FIND_GRAVITY_DRIVING_HEAD(head: number, H_down: number): GateFin
         }];
     }
     return [];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 9.11 — PUMP-CURVE INPUT CONTRACT  (Q10, DOMAIN §15 (vii))
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Same split as SECTION 9.8/9.10: pure `FIND_` predicates the gate lists, `ASSERT_` wrappers that
+// `PREPARE_valve` calls before the curve is used. One gate at two layers (L147): the gate reaches
+// the same `FIND_` calls through `scenario_dispatch.ts`, so a direct solver caller is refused too.
+// Every comparison is in the NaN-refusing form `!(x > y)` (DC-13/DC-14).
+
+const PUMP_CURVE_FAIL = 'Invalid pump curve';
+
+function pumpCurveFinding(message: string): GateFinding {
+    return { code: 'B10', severity: GATE_SEVERITY('B10'), kind: 'contract-violation',
+             where: 'Pump curve', message: `${PUMP_CURVE_FAIL}: ${message}` };
+}
+
+/** B10 — the fitted curve itself: a, b, c, H_suct finite; a < 0; b ≤ 0; c > 0. */
+export function FIND_PUMP_CURVE(curve: PumpCurve): GateFinding[] {
+    const { a, b, c, H_suct } = curve;
+    if (![a, b, c, H_suct].every(Number.isFinite)) {
+        return [pumpCurveFinding(`coefficients and suction head must be finite (a = ${a}, b = ${b}, ` +
+                                 `c = ${c}, H_suct = ${H_suct}).`)];
+    }
+    if (!(a < 0) || !(b <= 0) || !(c > 0)) {
+        return [pumpCurveFinding(`the curve must fall with flow and have no hump: a < 0, b ≤ 0, c > 0 ` +
+                                 `(given a = ${a}, b = ${b}, c = ${c}).`)];
+    }
+    return [];
+}
+
+/** `FIND_PUMP_CURVE`, plus the carrier rule: trip never (`tripTime = haltTime = Infinity`, W2). */
+function ASSERT_PUMP_CURVE(pump: PumpParams, ctx: string): void {
+    const f = FIND_PUMP_CURVE(pump.curve!);
+    if (f.length) throw new Error(`${ctx}: ${f[0].message}`);
+    if (pump.tripTime !== Infinity || pump.haltTime !== Infinity) {
+        throw new Error(`${ctx}: a user pump curve needs tripTime = haltTime = Infinity (trip never; ` +
+                        `given ${pump.tripTime}, ${pump.haltTime}).`);
+    }
+}
+
+/** Duty point (DOMAIN §15 (iv)): findings and, when there are none, the derived steady flow Q0. */
+function PUMP_DUTY_POINT(
+    pipes: PipeSection[], curve: PumpCurve, valve: ValveParams, Z0: number
+): { findings: GateFinding[]; Q0: number } {
+    const { a, b, c, H_suct } = curve;
+    const fail = (f: GateFinding) => ({ findings: [f], Q0: NaN });
+    if (!Number.isFinite(valve.H_down) || !Number.isFinite(H_suct) || !Number.isFinite(Z0)) {
+        return fail({ code: 'B1', severity: GATE_SEVERITY('B1'), kind: 'contract-violation',
+            where: 'Suction head / downstream head at the valve',
+            message: `suction head, pump elevation and downstream head must be finite (H_suct = ` +
+                     `${H_suct} m, Z0 = ${Z0} m, H_down = ${valve.H_down} m).` });
+    }
+    // Suction floor (DC-12, plan §5 P1): a fixed-head inlet at or below vapour is not a liquid inlet.
+    if (!(H_suct - Z0 > VAPOR_H_REL)) {
+        return fail({ code: 'B11', severity: GATE_SEVERITY('B11'), kind: 'contract-violation',
+            where: 'Suction pressure',
+            message: `Suction pressure too low: ${H_suct - Z0} m is at or below vapour pressure ` +
+                     `(${VAPOR_H_REL} m gauge).` });
+    }
+    const K = pipes.reduce((acc, p) => {
+        const A = Math.PI * p.diameter * p.diameter / 4.0;
+        return acc + (p.frictionFactor * p.length) / (p.diameter * 2.0 * G * A * A);
+    }, 0.0) + 1.0 / (valve.Cv0 * valve.Cv0);
+    const C = c + H_suct - valve.H_down;
+    if (!(C > 0)) {
+        return fail({ code: 'B5', severity: GATE_SEVERITY('B5'), kind: 'contract-violation',
+            where: 'Pump shut-off head / downstream head at the valve',
+            message: `Insufficient pressure/head: suction head + shut-off head (${H_suct + c} m) must ` +
+                     `exceed the downstream head at the valve (${valve.H_down} m).` });
+    }
+    if (!(K - a > 0)) return fail(pumpCurveFinding(`no steady duty point (K − a = ${K - a}).`));
+    const Q0 = 2.0 * C / (Math.sqrt(b * b + 4.0 * (K - a) * C) - b);   // cancellation-free (b ≤ 0)
+    if (!(Number.isFinite(Q0) && Q0 > 0)) return fail(pumpCurveFinding(`no steady duty point (Q0 = ${Q0}).`));
+    const rise = a * Q0 * Q0 + b * Q0 + c;
+    if (!(rise > 0)) {
+        return fail(pumpCurveFinding(`pump head at the duty point (Q0 = ${Q0} m³/s) is ${rise} m; it ` +
+                                     `must be above zero.`));
+    }
+    return { findings: [], Q0 };
+}
+
+/** B1/B11/B5/B10 — the duty point on the pump-fed valve path. Z0 = pump elevation (review F1). */
+export function FIND_PUMP_DUTY_POINT(
+    pipes: PipeSection[], curve: PumpCurve, valve: ValveParams, Z0: number
+): GateFinding[] {
+    return PUMP_DUTY_POINT(pipes, curve, valve, Z0).findings;
+}
+
+/** Throws the first `FIND_PUMP_DUTY_POINT` finding; else returns the derived Q0. */
+function ASSERT_PUMP_DUTY_POINT(
+    pipes: PipeSection[], curve: PumpCurve, valve: ValveParams, Z0: number, ctx: string
+): number {
+    const r = PUMP_DUTY_POINT(pipes, curve, valve, Z0);
+    if (r.findings.length) throw new Error(`${ctx}: ${r.findings[0].message}`);
+    return r.Q0;
 }
 
 

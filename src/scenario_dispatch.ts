@@ -31,8 +31,10 @@ import {
     PREPARE_pump, PREPARE_valve, PREPARE_gravityValve, SteadyStateResult,
     PipeSection, PumpParams, ReservoirParams,
     ValveParams, ClosureLaw, SimulationResults,
-    GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT
+    GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
+    PumpCurve, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0
 } from './solver';
+import { fitPumpCurve, PumpCurvePoint } from './pump_curve';
 
 export type Scenario = 'pump-trip' | 'pump-valve' | 'gravity-valve';
 
@@ -161,6 +163,49 @@ export interface DispatchInputs {
     reservoir: ReservoirParams;     // used by 'pump-trip' only
     valve?:    SelectorValveInput;  // required for both valve scenarios
     gravity?:  SelectorGravityInput; // required for 'gravity-valve'
+    /** Q10: user pump curve, 'pump-valve' only (ignored elsewhere). Points in SI (flow m³/s, head
+     *  rise m); suction pressure in m of water, gauge. Given = the steady flow is derived. */
+    pumpCurve?: { points: PumpCurvePoint[]; suctionPressure: number };
+}
+
+/** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only
+ *  called after `FIND_PUMP_CURVE_INPUTS` found the points fit. */
+function pumpCurveOf(inputs: DispatchInputs): PumpCurve | undefined {
+    const pc = inputs.pumpCurve;
+    if (!pc) return undefined;
+    const fit = fitPumpCurve(pc.points ?? []);
+    if (!fit.ok) return undefined;
+    return { ...fit.curve, H_suct: pc.suctionPressure + inputs.pump.elevation };
+}
+
+/**
+ * Q10 — B1/B11/B10/B5 for the pump curve inputs (plan §5), first-finding semantics like the rest of
+ * `FIND_SCENARIO_INPUTS`. The suction floor is tested on the ENTERED pressure (review W1: the round
+ * trip through H_suct − Z0 can land 1 ULP either side); the solver repeats it on H_suct − Z0.
+ * The duty point runs only when its other inputs are sound — those faults are reported by their
+ * own checks (B1/B6/B8), and a duty-point finding derived from them would blame the curve.
+ */
+function FIND_PUMP_CURVE_INPUTS(inputs: DispatchInputs, v: SelectorValveInput): GateFinding[] {
+    const pc = inputs.pumpCurve!;
+    const sp = pc.suctionPressure;
+    if (typeof sp !== 'number' || !Number.isFinite(sp)) {
+        return [GATE_FINDING('B1', 'contract-violation', 'Suction pressure',
+            `Suction pressure is ${sp}. It must be a finite number (m of water, gauge).`)];
+    }
+    if (!(sp > VAPOR_PRESSURE_GAUGE_M)) {
+        return [GATE_FINDING('B11', 'contract-violation', 'Suction pressure',
+            `Suction pressure too low: ${sp} m is at or below vapour pressure (${VAPOR_PRESSURE_GAUGE_M} m).`)];
+    }
+    const fit = fitPumpCurve(pc.points ?? []);
+    if ('reason' in fit) return [GATE_FINDING('B10', 'contract-violation', 'Pump curve', `Invalid pump curve: ${fit.reason}.`)];
+    const curve = pumpCurveOf(inputs)!;
+    const Z0 = inputs.pump?.elevation;
+    const Cv0 = toSolverCv0(v.coefficient);
+    const pipesOk = inputs.pipes.length > 0 && inputs.pipes.every(p =>
+        [p.length, p.diameter, p.frictionFactor].every(Number.isFinite) && p.length > 0 && p.diameter > 0);
+    if (!Number.isFinite(Z0) || FIND_VALVE_CV0(Cv0).length || !pipesOk) return [];
+    return FIND_PUMP_DUTY_POINT(inputs.pipes, curve,
+        { Cv0, law: v.law, H_down: resolveHDown(v, inputs.pipes), check_valve: v.check_valve }, Z0);
 }
 
 export function toSolverCv0(c: ValveCoefficient): number {
@@ -206,7 +251,9 @@ export function FIND_SCENARIO_INPUTS(scenario: Scenario, inputs: DispatchInputs)
     if (scenario === 'pump-valve') {
         if (!v) return [GATE_FINDING('B1', 'contract-violation', 'Valve settings',
             'The pump-fed valve-closure scenario needs valve settings.')];
-        return FIND_DOWNSTREAM_BOUNDARY(v, inputs.pipes);
+        const boundary = FIND_DOWNSTREAM_BOUNDARY(v, inputs.pipes);
+        if (boundary.length || !inputs.pumpCurve) return boundary;
+        return FIND_PUMP_CURVE_INPUTS(inputs, v);   // Q10
     }
 
     // gravity-valve
@@ -254,9 +301,12 @@ export function buildScenarioArgs(scenario: Scenario, inputs: DispatchInputs): S
             };
             // Neutralize the UI's trip/halt inputs: selecting this scenario must never
             // superimpose a pump trip on the closure (defect fix, user-observed S58).
-            const pumpNoTrip: PumpParams = {
-                ...inputs.pump, tripTime: PUMP_TRIP_NEVER_S, haltTime: 2 * PUMP_TRIP_NEVER_S
-            };
+            // Q10: with a user curve, trip never is Infinity (the solver's curve contract, plan §5
+            // P2/W2) and the curve rides on `pump`; without one, unchanged byte for byte.
+            const curve = pumpCurveOf(inputs);
+            const pumpNoTrip: PumpParams = curve
+                ? { ...inputs.pump, tripTime: Infinity, haltTime: Infinity, curve }
+                : { ...inputs.pump, tripTime: PUMP_TRIP_NEVER_S, haltTime: 2 * PUMP_TRIP_NEVER_S };
             return { kind: 'pump-valve', pipes: inputs.pipes, pump: pumpNoTrip, valve: valveParams };
         }
         case 'gravity-valve': {

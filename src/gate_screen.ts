@@ -200,12 +200,16 @@ const PROBLEM_LINE: Record<GateCode, string> = {
     B7: 'Partially filled pipe section',
     B8: 'Pipe list empty, or a pipe with zero or negative length or diameter',
     B9: 'Invalid valve closure timing',
+    B10: 'Invalid pump curve',          // Q10, ruling Q6-e
+    B11: 'Suction pressure too low',    // Q10, ruling Q6-i
     // Advisories: the text after "Note: " (SPEC_S63.md §4.2's conditions, in plain words).
     A1: 'Low flow - the accuracy of the results has not been verified at this flow',
     A2: 'Velocity above 3 m/s',
     A3: 'Pressure line within 2 m of the vapour line',
     A4: 'A pipe segment is shorter than one calculation step',
     A5: 'Valve closes faster than one pressure-wave round trip - surge will be maximal',
+    A6: 'Pump curve hump removed',         // Q10, ruling Q6-c (builder's text)
+    A7: 'Duty point outside pump curve',   // Q10, ruling Q6-e
 };
 
 export interface GateMessage {
