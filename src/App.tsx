@@ -41,8 +41,7 @@ import {
   Legend, 
   ResponsiveContainer,
   AreaChart,
-  Area,
-  ReferenceArea
+  Area
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
@@ -58,8 +57,8 @@ import { evaluateGate, GateReport } from './gate_checks';
 import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 // ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
 import {
-  buildGateChartData, vapourCrossingReaches, tooltipFields, summaryMode, fixedNoNegZero,
-  runAnalysisState, GateChartPoint, numberCaveats, isBelowVapour,
+  buildGateChartData, tooltipFields, summaryMode, fixedNoNegZero,
+  runAnalysisState, GateChartPoint, numberCaveats,
   gateMessage, acknowledgeReturnTo, modalAutoDismiss, GATE_PASS_LINE, GATE_FAIL_TITLE,
 } from './gate_screen';
 
@@ -81,9 +80,6 @@ function GateTooltip({ active, payload, caveats }: { active?: boolean; payload?:
             <span>VELOCITY {f.velocity.toFixed(3)} m/s</span>
           </React.Fragment>
         ))}
-      </div>
-      <div className={cn("mt-1 pt-1 border-t border-slate-100", isBelowVapour(t.margin) ? "text-red-600 font-bold" : "")}>
-        MARGIN ABOVE VAPOUR {t.margin.toFixed(2)} m
       </div>
       {caveats?.map(c => (
         <div key={c} className="mt-1 font-sans font-bold text-amber-700 max-w-[18rem] whitespace-normal">{c}</div>
@@ -572,7 +568,6 @@ export default function App() {
 
   // ── D-5c: Screen 2's derived display data. Projections of the report, nothing computed. ──────
   const gateChart = useMemo(() => gateProfile ? buildGateChartData(gateProfile) : [], [gateProfile]);
-  const gateCrossings = useMemo(() => gateProfile ? vapourCrossingReaches(gateProfile) : [], [gateProfile]);
   const gateSummary = useMemo(() => gateProfile ? summariseProfile(gateProfile) : null, [gateProfile]);
   const runState = gateReport ? runAnalysisState(gateReport) : { available: false };
   // D-6: the genuinely clean case closes itself after 3 s; anything else waits for a click (PLAN_S68 §4 6.6).
@@ -787,7 +782,7 @@ export default function App() {
               <span className="text-xs font-bold text-red-600 max-w-[16rem] truncate">
                 Gate could not run
               </span>
-            ) : gateReport ? (
+            ) : gateReport && view !== 'gate' ? (
               <div data-gate-status className="text-[11px] leading-tight max-w-[24rem]">
                 <GateMessageView report={gateReport} />
               </div>
@@ -1581,7 +1576,7 @@ export default function App() {
       )}
 
       {/* ── Screen 2 — the gate screen (Row 3.11 Unit C, D-5c) ──────────────────────────────
-          Profile + HGL + vapour line, the 7-field tooltip, the summary rail and the findings
+          Profile + HGL (no vapour line, Q12), the tooltip, the summary rail and the findings
           rail, all from `gateProfile` / `gateReport` through gate_screen.ts. Nothing here
           computes a head, a pressure, a margin, a velocity or a verdict. */}
       {view === 'gate' && gateReport && (() => {
@@ -1602,7 +1597,7 @@ export default function App() {
       <main data-screen="gate" className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-6">
         <section className="flex-1 min-w-0 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
           <h3 className="text-lg font-bold">Steady-State Profile</h3>
-          <p className="text-sm text-slate-500 mb-4">Pipeline, pressure line (HGL) and vapour line — {SCENARIO_LABEL[scenario]}</p>
+          <p className="text-sm text-slate-500 mb-4">Pipeline and pressure line (HGL) —{SCENARIO_LABEL[scenario]}</p>
           {caveatBox}
           {gateProfile ? (
             <div className="h-[460px]">
@@ -1616,13 +1611,8 @@ export default function App() {
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} domain={['auto', 'auto']} />
                   <Tooltip content={<GateTooltip caveats={caveats} />} />
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
-                  {gateCrossings.map(r => (
-                    <React.Fragment key={r.index}><ReferenceArea x1={r.startDistance} x2={r.endDistance} {...({ fill: '#ef4444', fillOpacity: 0.12 } as any) /* recharts 3 Props typing omits SVG fill in this setup */}
-                      label="below vapour" /></React.Fragment>
-                  ))}
                   <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
-                  <Line name="Vapour line" type="linear" dataKey="vapour" stroke="#dc2626" strokeWidth={1.5} strokeDasharray="2 3" dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -1652,9 +1642,6 @@ export default function App() {
                     : `${s.velocityMin.value.toFixed(3)}–${s.velocityMax.value.toFixed(3)} m/s`}</span></div>
                 {fmtNode('Inlet', s.inlet)}
                 {fmtNode('Outlet', s.outlet)}
-                {fmtNode('Worst point', s.worst)}
-                <div className="flex justify-between gap-2"><span className="text-slate-500">Worst at</span>
-                  <span className="font-mono">{s.worst.distance.toFixed(1)} m · margin {s.worst.margin.toFixed(2)} m</span></div>
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Head loss along pipeline</span>
                   <span className="font-mono">{s.headLossAlongPipeline.toFixed(2)} m</span></div>
               </>
