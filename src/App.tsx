@@ -59,7 +59,7 @@ import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 import {
   buildGateChartData, tooltipFields, summaryMode, fixedNoNegZero,
   runAnalysisState, GateChartPoint, numberCaveats,
-  gateMessage, acknowledgeReturnTo, modalAutoDismiss, GATE_PASS_LINE, GATE_FAIL_TITLE,
+  gateMessage, acknowledgeReturnTo, modalAutoDismiss, GATE_PASS_LINE, GATE_FAIL_TITLE, A3_NOTE,
 } from './gate_screen';
 
 /** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
@@ -105,7 +105,7 @@ function GateMessageView({ report }: { report: GateReport }) {
           {m.problems.map(p => <p key={p} data-gate-problem className="text-red-600">{p}</p>)}
         </>
       )}
-      {m.notes.map(n => <p key={n} data-gate-note className="text-slate-600">{n}</p>)}
+      {m.notes.filter(n => n !== A3_NOTE).map(n => <p key={n} data-gate-note className="text-slate-600">{n}</p>)}
     </div>
   );
 }
@@ -1597,7 +1597,7 @@ export default function App() {
       <main data-screen="gate" className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-6">
         <section className="flex-1 min-w-0 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
           <h3 className="text-lg font-bold">Steady-State Profile</h3>
-          <p className="text-sm text-slate-500 mb-4">Pipeline and pressure line (HGL) —{SCENARIO_LABEL[scenario]}</p>
+          <p className="text-sm text-slate-500 mb-4">Pipeline and pressure line (HGL) — {SCENARIO_LABEL[scenario]}</p>
           {caveatBox}
           {gateProfile ? (
             <div className="h-[460px]">

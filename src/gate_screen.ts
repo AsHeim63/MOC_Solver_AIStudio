@@ -188,6 +188,8 @@ export const GATE_PASS_LINE  = 'All checks passed - transient simulation can be 
 export const GATE_FAIL_TITLE = 'System Check Failed:';
 /** The state phase threw: no blocking check failed, yet there is no steady state to run from. */
 export const STEADY_FAILED_LINE = 'Steady state could not be calculated';
+/** A3's note text. Not shown on screen (ANSWERS 2026-10-12 Q10 (b), row Q12); the check itself is unchanged. */
+export const A3_NOTE = 'Note: Pressure line within 2 m of the vapour line';
 
 /** One short plain line per blocking check (builder's wording, LOOK-AT 2026-10-03, not overruled). */
 const PROBLEM_LINE: Record<GateCode, string> = {
@@ -205,7 +207,7 @@ const PROBLEM_LINE: Record<GateCode, string> = {
     // Advisories: the text after "Note: " (SPEC_S63.md §4.2's conditions, in plain words).
     A1: 'Low flow - the accuracy of the results has not been verified at this flow',
     A2: 'Velocity above 3 m/s',
-    A3: 'Pressure line within 2 m of the vapour line',
+    A3: A3_NOTE.slice('Note: '.length),
     A4: 'A pipe segment is shorter than one calculation step',
     A5: 'Valve closes faster than one pressure-wave round trip - surge will be maximal',
     A6: 'Pump curve hump removed',         // Q10, ruling Q6-c (builder's text)
