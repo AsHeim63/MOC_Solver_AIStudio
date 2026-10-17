@@ -31,13 +31,10 @@ export interface AirValveStudy {
 
 interface Placed { node: number; k: number; nonSlam: boolean }
 
-/** Minimum gauge pressure at node i [m]. */
-const minGauge = (r: SimulationResults, i: number): number => r.nodes[i].minHead - r.nodes[i].elevation;
-
 /** Nodes whose minimum gauge pressure is below −1 m. */
 function lowNodes(r: SimulationResults): number[] {
     const out: number[] = [];
-    r.nodes.forEach((_, i) => { if (minGauge(r, i) < MIN_GAUGE_HEAD_M) out.push(i); });
+    r.nodes.forEach((n, i) => { if (n.minHead - n.elevation < MIN_GAUGE_HEAD_M) out.push(i); });
     return out;
 }
 
@@ -83,11 +80,9 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
         stretch.set(i, sid);
     }
     const owner = (i: number): number => {
-        const s = stretch.get(i);
-        if (s === undefined) return -1;
         let best = -1;
         placed.forEach((v, j) => {
-            if (s === stretch.get(v.node) &&
+            if (stretch.get(i) !== undefined && stretch.get(i) === stretch.get(v.node) &&
                 (best < 0 || Math.abs(v.node - i) < Math.abs(placed[best].node - i))) best = j;
         });
         return best;
@@ -128,7 +123,7 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
         const left = lowNodes(stage2).filter(i => owner(i) >= 0 && !placed.some(v => v.node === i) &&
                                                   sites.some(n => Math.abs(n - i) === 1));
         if (!left.length) break;
-        const p = (i: number) => minGauge(stage2, i);
+        const p = (i: number) => stage2.nodes[i].minHead - stage2.nodes[i].elevation;
         placed.push({ node: left.reduce((a, b) => (p(b) < p(a) ? b : a)), k: 0, nonSlam: false });
         stage2 = fit();
     }
