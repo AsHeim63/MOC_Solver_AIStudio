@@ -32,7 +32,7 @@ import {
     PipeSection, PumpParams, ReservoirParams,
     ValveParams, ClosureLaw, SimulationResults,
     GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
-    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC
+    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0
 } from './solver';
 import { fitPumpCurve, pumpCurveFitFault, PumpCurvePoint } from './pump_curve';
 
@@ -166,9 +166,6 @@ export interface DispatchInputs {
     /** Q10: user pump curve, 'pump-valve' only (ignored elsewhere). Points in SI (flow m³/s, head
      *  rise m); suction pressure in m of water, gauge. Given = the steady flow is derived. */
     pumpCurve?: { points: PumpCurvePoint[]; suctionPressure: number };
-    /** Q14: air valves on the line (transient run only; the steady state ignores them).
-     *  Absent or [] = today's run, bit-identical. */
-    airValves?: AirValveBC[];
 }
 
 /** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only
@@ -382,15 +379,15 @@ export function dispatchSimulation(
     switch (a.kind) {
         case 'pump-trip': {
             trace?.(runWaterHammerSimulation.name);   // label from the actual reference (audit S58 F7)
-            return runWaterHammerSimulation(a.pipes, a.pump, a.reservoir, trace, inputs.airValves);
+            return runWaterHammerSimulation(a.pipes, a.pump, a.reservoir, trace);
         }
         case 'pump-valve': {
             trace?.(runWaterHammerSimulationValve.name);
-            return runWaterHammerSimulationValve(a.pipes, a.pump, a.valve, trace, inputs.airValves);
+            return runWaterHammerSimulationValve(a.pipes, a.pump, a.valve, trace);
         }
         case 'gravity-valve': {
             trace?.(runWaterHammerSimulationGravityValve.name);
-            return runWaterHammerSimulationGravityValve(a.pipes, a.upstream, a.valve, trace, inputs.airValves);
+            return runWaterHammerSimulationGravityValve(a.pipes, a.upstream, a.valve, trace);
         }
         default: {
             const never: never = a;

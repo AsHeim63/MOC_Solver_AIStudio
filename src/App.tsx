@@ -48,7 +48,6 @@ import { cn } from './lib/utils';
 import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
-import { sizeAirValves, AirValveStudy } from './air_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
@@ -187,8 +186,6 @@ export default function App() {
   // the same number meaning a different system. The key is removed on mount instead.
   const [outletPressure, setOutletPressure] = useState(DEFAULT_OUTLET_PRESSURE);
   const [results, setResults] = useState<SimulationResults | null>(null);
-  // Q14: air valve study (stage 1 unprotected, stage 2 protected); null until "Size air valves".
-  const [avStudy, setAvStudy] = useState<AirValveStudy | null>(null);
   const [isSimulating, setIsSimulating] = useState(false);
 
     // ── Scenario control (Row 3.11 Unit C, D-7 — ruling R1) ───────────────────
@@ -528,30 +525,10 @@ export default function App() {
         const res = dispatchSimulation(scenario, inputs);
 
         setResults(res);
-        setAvStudy(null);
         setSimError(null);
         setSelectedNodeIdx(0);
       } catch (error) {
         console.error("Simulation failed", error);
-        setSimError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setIsSimulating(false);
-      }
-    }, 100);
-  };
-
-  // Q14: size air valves after the transient run; shows stage 2, stage 1 stays one click away.
-  const handleSizeAirValves = () => {
-    setIsSimulating(true);
-    setIsAnimating(false);
-    setTimeout(() => {
-      try {
-        const study = sizeAirValves(scenario, buildDispatchInputs());
-        setAvStudy(study);
-        setResults(study.stage2);
-        setSimError(null);
-      } catch (error) {
-        console.error("Air valve sizing failed", error);
         setSimError(error instanceof Error ? error.message : String(error));
       } finally {
         setIsSimulating(false);
@@ -674,16 +651,14 @@ export default function App() {
     }));
   }, [results, currentFrame, animTime]);
 
-  // Q14: every later stage keeps the stage-1 (unprotected) axis scale.
-  const scaleResults = avStudy?.stage1 ?? results;
   const yAxisDomain = useMemo(() => {
-    if (!scaleResults) return ['auto', 'auto'] as [any, any];
-    const minYValue = Math.min(...scaleResults.nodes.map(n => Math.min(n.elevation, n.minHead)));
-    const maxHead = Math.max(...scaleResults.nodes.map(n => n.maxHead));
+    if (!results) return ['auto', 'auto'] as [any, any];
+    const minYValue = Math.min(...results.nodes.map(n => Math.min(n.elevation, n.minHead)));
+    const maxHead = Math.max(...results.nodes.map(n => n.maxHead));
     const yMin = Math.round((minYValue - 15) / 5) * 5;
     const yMax = Math.round(maxHead + 10);
     return [yMin, yMax] as [number, number];
-  }, [scaleResults]);
+  }, [results]);
 
  // Selectable nodes: upstream boundary + all pipe-to-pipe junction nodes
   const selectableNodes = useMemo(() => {
@@ -726,18 +701,6 @@ export default function App() {
       vaporVolume: f.vapors ? f.vapors[selectedNodeIdx] : 0
     }));
   }, [results, selectedNodeIdx]);
-
-  // Q14: pressure / flow tab axes from stage 1 at the selected node (auto without a study).
-  const tabYDomain = useMemo(() => {
-    const auto = ['auto', 'auto'] as [any, any];
-    const r = avStudy?.stage1, z = r?.nodes[selectedNodeIdx]?.elevation;
-    if (!r || z === undefined) return { pressure: auto, flow: auto };
-    const span = (v: number[]) => [Math.floor(Math.min(...v)), Math.ceil(Math.max(...v))] as [number, number];
-    return {
-      pressure: span(r.fullHistory.map(f => f.heads[selectedNodeIdx] - z)),
-      flow: span(r.fullHistory.map(f => (f.flows ? f.flows[selectedNodeIdx] : 0))),
-    };
-  }, [avStudy, selectedNodeIdx]);
 
   // Effective t_max for tab charts given current zoom level
   const effectiveTabTMax = useMemo(() => {
@@ -1319,51 +1282,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Q14: air valves (solver stage 2) */}
-                  <section data-q14="air-valves" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <h3 className="text-lg font-bold mr-auto">Air Valves</h3>
-                      {avStudy && ([1, 2] as const).map(k => {
-                        const r = k === 1 ? avStudy.stage1 : avStudy.stage2;
-                        return (
-                          <button key={k} onClick={() => { setIsAnimating(false); setResults(r); }}
-                            className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold border",
-                              results === r ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200")}>
-                            {k === 1 ? 'Stage 1 (unprotected)' : 'Stage 2 (with air valves)'}
-                          </button>
-                        );
-                      })}
-                      <button onClick={handleSizeAirValves} disabled={isSimulating}
-                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
-                        Size air valves
-                      </button>
-                    </div>
-                    {avStudy && (
-                      <div className="mt-4 text-xs">
-                        {avStudy.valves.length === 0 ? (
-                          <p className="text-slate-500">No air valves needed: the minimum pressure stays at or above −1 m.</p>
-                        ) : (
-                          <table className="w-full text-left">
-                            <thead className="text-slate-400 uppercase text-[10px]">
-                              <tr><th className="py-1">Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th><th>Non-Slam</th></tr>
-                            </thead>
-                            <tbody>
-                              {avStudy.valves.map(v => (
-                                <tr key={v.x} className="border-t border-slate-100">
-                                  <td className="py-1">{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
-                                  <td>{v.inlet_mm} / {v.nonSlam ? v.outlet_mm : v.inlet_mm}</td><td>{v.nonSlam ? 'Yes' : 'No'}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                        {avStudy.unresolved.length > 0 && (
-                          <p className="mt-2 text-amber-700">Still below −1 m with the largest size at x = {avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
-                        )}
-                      </div>
-                    )}
-                  </section>
-
                   {/* Pressure Envelope & Animation */}
                   <section className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden">
                     <div className="flex justify-between items-start mb-6">
@@ -1569,7 +1487,7 @@ export default function App() {
                                   tick={{ fontSize: 10 }}
                                   tickFormatter={(val) => Math.round(val).toString()}
                                 />
-                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Math.round(val).toString()} domain={tabYDomain.pressure} />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Math.round(val).toString()} />
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
@@ -1637,7 +1555,7 @@ export default function App() {
                                   tick={{ fontSize: 10 }}
                                   tickFormatter={(val) => Math.round(val).toString()}
                                 />
-                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => val.toFixed(2)} domain={tabYDomain.flow} />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => val.toFixed(2)} />
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}

@@ -982,152 +982,6 @@ export function CALC_JUNCTION_DGCM_N(
     return { H, V_g, C_gas: C_gas_new, Q };
 }
 
-// ── 7g: Air valve node (Q14) ──────────────────────────────────────────────────
-/**
- * BOX: CALC_AIR_VALVE_N — air valve (air inlet/outlet) at an interior or junction node (Q14).
- *
- * Wylie & Streeter, Fluid Transients in Systems (1993) §3.6: air enters through the inlet orifice
- * while the line is below atmospheric, is trapped as a pocket that follows the isothermal gas law,
- * and leaves through the outlet orifice while above atmospheric. No air and liquid at or above
- * atmospheric = the valve is closed and the node is plain liquid. Cd = 0.6 both orifices.
- *
- * Air content is carried in head·volume units, C_air = H_abs·V = m·R·T/(ρ_w·g) [m⁴] — the same
- * units as the DGCM C_gas, stored in the node's C_gas slot; the pocket volume is the node's V_g.
- * Coexistence with the vapour-cavity model: the pressure never goes below vapour (H_vap); when the
- * air alone cannot fill the pocket at H_vap, H is pinned there and vapour fills the rest (it
- * condenses as the pressure rises, as in the DGCM). Implicit step, solved by bisection on H:
- *   V(H)  = V_old + dt·Σ_k(H − C_k)/B_k            (same net-outflow balance as CALC_JUNCTION_DGCM_N)
- *   C(H)  = max(0, C_air + dt·KC·ṁ(H))             (ṁ: air mass flow, + = in)
- *   (H − Z + H_BARO)·V(H) = C(H)                   (isothermal gas law; LHS rises, RHS falls with H)
- * Pocket vented to zero volume = closed; H is then the liquid (Joukowsky) head, the DGCM collapse
- * convention (CALC_INTERIOR_DGCM) — H from V = 0 instead puts a one-step false suction pulse
- * of V_old/(dt·Σ1/B) metres on the line at every closure.
- */
-export interface AirValveBC {
-    x:         number;   // chainage of the valve node from node 0 [m]
-    inlet_mm:  number;   // inlet orifice diameter  [mm]
-    outlet_mm: number;   // outlet orifice diameter [mm]
-}
-const AIR_CD   = 0.6;      // orifice discharge coefficient, inlet and outlet (Q14 spec)
-const AIR_RT   = 287.1 * 293.15;   // R·T of air at 20 °C [J/kg]
-const RHO_W    = 1000;     // water density [kg/m³]
-const AIR_CRIT = 0.528;    // critical pressure ratio (k = 1.4)
-
-/** Air mass flow through the valve [kg/s], + = into the pocket (W&S eqs 3.45–3.48). */
-function AIR_MASS_FLOW(H_abs: number, A_in: number, A_out: number): number {
-    const pa = RHO_W * G * H_BARO;
-    const p  = RHO_W * G * Math.max(H_abs, 0);
-    const sub = (hi: number, r: number) =>
-        Math.sqrt(7 * hi * (hi / AIR_RT) * (Math.pow(r, 1 / 0.7) - Math.pow(r, 1.2 / 0.7)));
-    if (p < pa) {
-        const r = p / pa;
-        return AIR_CD * A_in * (r < AIR_CRIT ? 0.686 * pa / Math.sqrt(AIR_RT) : sub(pa, r));
-    }
-    const r = pa / p;
-    return -AIR_CD * A_out * (r < AIR_CRIT ? 0.686 * p / Math.sqrt(AIR_RT) : sub(p, r));
-}
-
-export function CALC_AIR_VALVE_N(
-    faces:  readonly JunctionFaceN[],
-    V_old:  number,
-    C_air:  number,
-    Z:      number,
-    dt:     number,
-    A_in:   number,
-    A_out:  number,
-    dev?:   (H: number) => number    // boundary device outflow [m³/s], non-decreasing in H (Q14 ruling 3)
-): JunctionResultN {
-    let sum_inv_B = 0.0, sum_C_over_B = 0.0;
-    for (const f of faces) { sum_inv_B += 1.0 / f.B; sum_C_over_B += f.C / f.B; }
-    const a_coef   = dt * sum_inv_B;
-    const b_coef   = V_old - dt * sum_C_over_B;
-    const vol = (H: number) => a_coef * H + b_coef + (dev ? dt * dev(H) : 0);   // pocket volume at H
-    const H_liquid = dev ? ROOT_INCREASING(H => vol(H) - V_old, sum_C_over_B / sum_inv_B)
-                         : sum_C_over_B / sum_inv_B;
-    const KC       = AIR_RT / (RHO_W * G);
-    const air = (H: number) => Math.max(0, C_air + dt * KC * AIR_MASS_FLOW(H - Z + H_BARO, A_in, A_out));
-    const gap = (H: number) => (H - Z + H_BARO) * vol(H) - air(H);
-
-    let H: number, V_g: number, C: number;
-    if (V_old <= 0 && C_air <= 0 && H_liquid >= Z) {
-        H = H_liquid; V_g = 0; C = 0;                          // closed, full of liquid
-    } else {
-        const H_zero = dev ? ROOT_INCREASING(vol, H_liquid)    // head at which the pocket volume is 0
-                           : -b_coef / a_coef;
-        const H_vap  = Z + VAPOR_H_REL;
-        let lo = Math.max(H_zero, H_vap);
-        if (gap(lo) >= 0) {
-            if (H_zero >= H_vap) { H = H_liquid; V_g = 0; C = 0; }    // air vented, valve closes
-                                                                       // (liquid state, as DGCM collapse)
-            else { H = H_vap; V_g = vol(H_vap); C = air(H_vap); }    // vapour fills the rest
-        } else {
-            let hi = Math.max(lo, Z) + 1.0;
-            while (gap(hi) < 0) hi = lo + 2.0 * (hi - lo);
-            for (let k = 0; k < 80; k++) {
-                const mid = 0.5 * (lo + hi);
-                if (gap(mid) < 0) lo = mid; else hi = mid;
-            }
-            H = 0.5 * (lo + hi); V_g = vol(H); C = air(H);
-        }
-    }
-    const Q = faces.map(f => (f.incoming ? (f.C - H) / f.B : (H - f.C) / f.B));
-    return { H, V_g, C_gas: C, Q };
-}
-
-/** Root of an increasing function f (bracket grown from h0, then bisection). Q14 boundary valves. */
-function ROOT_INCREASING(f: (H: number) => number, h0: number): number {
-    let lo = h0 - 1.0, hi = h0 + 1.0;
-    for (let k = 0; k < 200 && f(lo) > 0; k++) lo = h0 - 2.0 * (h0 - lo);
-    for (let k = 0; k < 200 && f(hi) < 0; k++) hi = h0 + 2.0 * (hi - h0);
-    for (let k = 0; k < 80; k++) {
-        const mid = 0.5 * (lo + hi);
-        if (f(mid) < 0) lo = mid; else hi = mid;
-    }
-    return 0.5 * (lo + hi);
-}
-
-/** Q14: map each air valve to its nearest mesh node (x as in the result nodes). An end node is
- *  accepted (ruling 3): runCore couples it to the pump or valve BC there; at a constant-head
- *  reservoir the head is fixed, so the valve has no effect there. */
-function AIR_VALVE_NODES(
-    layout: MeshLayout, airValves: AirValveBC[]
-): Map<number, { A_in: number; A_out: number }> {
-    const xs: number[] = [0];
-    for (const p of layout.pipeParams) for (let i = 0; i < p.N; i++) xs.push(xs[xs.length - 1] + p.dx);
-    const out = new Map<number, { A_in: number; A_out: number }>();
-    const area = (mm: number) => Math.PI * (mm / 1000) ** 2 / 4;
-    for (const v of airValves) {
-        if (![v.x, v.inlet_mm, v.outlet_mm].every(Number.isFinite) || !(v.inlet_mm > 0) || !(v.outlet_mm > 0)) {
-            throw new Error(`Air valve at x=${v.x}: position and orifice sizes must be finite, sizes > 0.`);
-        }
-        let idx = 0;
-        for (let i = 1; i < xs.length; i++) if (Math.abs(xs[i] - v.x) < Math.abs(xs[idx] - v.x)) idx = i;
-        out.set(idx, { A_in: area(v.inlet_mm), A_out: area(v.outlet_mm) });
-    }
-    return out;
-}
-
-/** Q14 ruling 3: pump flow into node 0 at head H [m³/s] — the pump relations of CALC_BC_PUMP_DGCM
- *  (α ramp; stopped = check valve shut; parabolic curve) and CALC_BC_PUMP_CURVE (Q6-h rule). */
-function PUMP_FLOW_AT_H(pump: PumpParams, steadyHead: number, t: number, H: number): number {
-    const alpha = t > pump.tripTime
-        ? Math.max(0.0, 1.0 - (t - pump.tripTime) / (pump.haltTime - pump.tripTime)) : 1.0;
-    if (alpha < 0.001) return 0.0;
-    if (pump.curve !== undefined) return pumpFlowAtHeadRise(pump.curve, alpha, H - pump.curve.H_suct);
-    const Hs = 1.33 * steadyHead, Qmax = 2.0 * pump.initialFlow;
-    const hd = alpha * alpha * Hs - H;
-    return hd > 0.0 ? Math.sqrt(hd * Qmax * Qmax / Hs) : 0.0;
-}
-
-/** Q14 ruling 3: valve throat flow out of the last node at head H [m³/s] — CALC_BC_VALVE's
- *  orifice law Q = Cv·τ·sqrt(H − H_down), reverse branch unless a check valve. */
-function VALVE_FLOW_AT_H(valve: ValveParams, t: number, H: number): number {
-    const Cv = valve.Cv0 * evalTau(valve.law, t);
-    if (Cv <= 0.0) return 0.0;
-    const d = H - valve.H_down;
-    return d >= 0.0 ? Cv * Math.sqrt(d) : (valve.check_valve ? 0.0 : -Cv * Math.sqrt(-d));
-}
-
 // ── 7c: Pump boundary (left end, node 0) ─────────────────────────────────────
 /**
  * BOX: CALC_BC_PUMP_DGCM
@@ -2080,8 +1934,7 @@ function runCore(
     source?:    GGASource,
     inputPipes?: PipeSection[],
     valve?: ValveParams,
-    upstreamReservoir?: { head: number },  // S57 node-0 gravity dispatch (SECTION 7f; spec §1.4)
-    airValves?: AirValveBC[]               // Q14: air valve nodes (SECTION 7g); absent/[] = none
+    upstreamReservoir?: { head: number }   // S57 node-0 gravity dispatch (SECTION 7f; spec §1.4)
 ): SimulationResults {
 
     // `rawPipeParams` is returned by INIT_RUN_STATE (the gate reads it) but is not destructured here:
@@ -2118,7 +1971,6 @@ function runCore(
     const maxV = new Float64Array(prevState.V_g);
 
     const grid: GridParams   = { dt: baseDt };
-    const avAt = airValves?.length ? AIR_VALVE_NODES(layout, airValves) : undefined;   // Q14
 
     // Reservoir BC dispatch (E5′/R2/R3 — DESIGN §6): one entry per reservoir node with its incident
     // (to-end) pipe and head. Legacy path has exactly one reservoir node (the terminal, incident = last
@@ -2171,17 +2023,6 @@ function runCore(
             CALC_BC_RESERVOIR_UP(0, coefsPump, prevState, newState, newFlow, upstreamReservoir.head);
         } else {
             CALC_BC_PUMP_DGCM(0, coefsPump, prevState, newState, newFlow, grid, pump, pumpHead, t, pipes[0].p);
-            const av0 = avAt?.get(0);
-            if (av0 !== undefined) {                       // Q14 ruling 3: air valve at the pump node
-                const qP = (H: number) => PUMP_FLOW_AT_H(pump, pumpHead, t, H);
-                const r = CALC_AIR_VALVE_N(
-                    [{ C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false }],
-                    prevState.V_g[0], prevState.C_gas[0], prevState.Z[0], grid.dt, av0.A_in, av0.A_out,
-                    H => -qP(H));
-                newState.H[0] = r.H; newState.V_g[0] = r.V_g; newState.C_gas[0] = r.C_gas;
-                newFlow.setQin(0, qP(r.H));
-                newFlow.setQout(0, r.Q[0]);
-            }
         }
 
         // 2. Interior nodes (per pipe, local offsets 1..N_p−1). Junctions handled in 2b.
@@ -2193,19 +2034,7 @@ function runCore(
                     idx, prevState, prevFlow, pipe, pipe, miabState_dummy, totalNodes,
                     pipeMIAB, pi, pi, o, o, layout.nodeIds
                 );
-                const av = avAt?.get(idx);
-                if (av === undefined) {
-                    CALC_INTERIOR_DGCM(idx, coefs, prevState, newState, newFlow, grid, pipe.p);
-                } else {                                           // Q14 air valve (SECTION 7g)
-                    const dxA = pipe.p.dx * pipe.p.A;
-                    const r = CALC_AIR_VALVE_N(
-                        [{ C: coefs.Cp, B: coefs.B1, dxA, incoming: true },
-                         { C: coefs.Cm, B: coefs.B2, dxA, incoming: false }],
-                        prevState.V_g[idx], prevState.C_gas[idx], prevState.Z[idx], grid.dt, av.A_in, av.A_out);
-                    newState.H[idx] = r.H; newState.V_g[idx] = r.V_g; newState.C_gas[idx] = r.C_gas;
-                    newFlow.setQin(idx, r.Q[0]);
-                    newFlow.setQout(idx, r.Q[1]);
-                }
+                CALC_INTERIOR_DGCM(idx, coefs, prevState, newState, newFlow, grid, pipe.p);
             }
         }
 
@@ -2237,12 +2066,9 @@ function runCore(
                 faces.push({ C: c.Cm, B: c.B2, dxA: pe.p.dx * pe.p.A, incoming: false });
                 scatter.push({ pipeIdx: pi, incoming: false });
             }
-            const avJ = avAt?.get(J.node);
-            const res = avJ === undefined
-                ? CALC_JUNCTION_DGCM_N(
-                    faces, prevState.V_g[J.node], prevState.C_gas[J.node], prevState.Z[J.node], grid.dt)
-                : CALC_AIR_VALVE_N(faces, prevState.V_g[J.node], prevState.C_gas[J.node], prevState.Z[J.node],
-                    grid.dt, avJ.A_in, avJ.A_out);   // Q14 air valve (SECTION 7g)
+            const res = CALC_JUNCTION_DGCM_N(
+                faces, prevState.V_g[J.node], prevState.C_gas[J.node], prevState.Z[J.node], grid.dt
+            );
             newState.H[J.node]     = res.H;
             newState.V_g[J.node]   = res.V_g;
             newState.C_gas[J.node] = res.C_gas;
@@ -2263,16 +2089,6 @@ function runCore(
             );
             if (valve !== undefined) {
                 CALC_BC_VALVE(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, pe.p);
-                const avE = avAt?.get(bc.node);
-                if (avE !== undefined) {                   // Q14 ruling 3: air valve at the valve inlet
-                    const n = bc.node;
-                    const r = CALC_AIR_VALVE_N(
-                        [{ C: coefsRes.Cp, B: coefsRes.B1, dxA: pe.p.dx * pe.p.A, incoming: true }],
-                        prevState.V_g[n], prevState.C_gas[n], prevState.Z[n], grid.dt, avE.A_in, avE.A_out,
-                        H => VALVE_FLOW_AT_H(valve, t, H));
-                    newState.H[n] = r.H; newState.V_g[n] = r.V_g; newState.C_gas[n] = r.C_gas;
-                    newFlow.setQin(n, r.Q[0]);
-                }
             } else {
                 CALC_BC_RESERVOIR(bc.node, coefsRes, prevState, newState, newFlow, bc.head);
             }
@@ -2414,12 +2230,10 @@ export function runWaterHammerSimulation(
     inputPipes: PipeSection[],
     pump:       PumpParams,
     reservoir:  ReservoirParams,
-    trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    trace?:     (fn: string) => void
 ): SimulationResults {
     const prep = PREPARE_pump(inputPipes, pump, reservoir, trace);
-    return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes,
-                   undefined, undefined, airValves);
+    return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes);
 }
 
 /**
@@ -2970,12 +2784,10 @@ export function runWaterHammerSimulationValve(
     inputPipes: PipeSection[],
     pump:       PumpParams,
     valve:      ValveParams,
-    trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    trace?:     (fn: string) => void
 ): SimulationResults {
     const prep = PREPARE_valve(inputPipes, pump, valve, trace);
-    return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes, valve,
-                   undefined, airValves);
+    return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes, valve);
 }
 
 
@@ -3139,12 +2951,11 @@ export function runWaterHammerSimulationGravityValve(
     inputPipes: PipeSection[],
     upstream:   GravityUpstream,
     valve:      ValveParams,
-    trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    trace?:     (fn: string) => void
 ): SimulationResults {
     const prep = PREPARE_gravityValve(inputPipes, upstream, valve, trace);
     return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes, valve,
-                   prep.upstreamReservoir, airValves);
+                   prep.upstreamReservoir);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
