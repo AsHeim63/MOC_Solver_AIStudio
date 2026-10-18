@@ -1323,14 +1323,16 @@ export default function App() {
                   <section data-q14="air-valves" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">Air Valves</h3>
-                      {avStudy && ([[avStudy.stage1, 'Stage 1 (unprotected)'],
-                                    [avStudy.stage2, 'Stage 2 (with air valves)']] as const).map(([r, label]) => (
-                        <button key={label} onClick={() => { setIsAnimating(false); setResults(r); }}
-                          className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold border",
-                            results === r ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200")}>
-                          {label}
-                        </button>
-                      ))}
+                      {avStudy && ([1, 2] as const).map(k => {
+                        const r = k === 1 ? avStudy.stage1 : avStudy.stage2;
+                        return (
+                          <button key={k} onClick={() => { setIsAnimating(false); setResults(r); }}
+                            className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold border",
+                              results === r ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200")}>
+                            {k === 1 ? 'Stage 1 (unprotected)' : 'Stage 2 (with air valves)'}
+                          </button>
+                        );
+                      })}
                       <button onClick={handleSizeAirValves} disabled={isSimulating}
                         className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
                         Size air valves
