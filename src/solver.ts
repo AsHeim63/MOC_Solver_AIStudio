@@ -2104,12 +2104,16 @@ function runCore(
     // shut — SECTION 7g, DC-5). Its first dead-end step starts with no air in the pocket: the end BC's
     // C_gas is DGCM memory (DOMAIN §4/§7, kept after collapse), not air that entered.
     const avEndOn = new Set<number>();
+    const AIR_VALVE_STEP = (n: number, av: { A_in: number; A_out: number }, C_air: number,
+                            faces: JunctionFaceN[]) => {
+        const r = CALC_AIR_VALVE_N(faces, prevState.V_g[n], C_air, prevState.Z[n], grid.dt, av.A_in, av.A_out);
+        newState.H[n] = r.H; newState.V_g[n] = r.V_g; newState.C_gas[n] = r.C_gas;
+        return r.Q;
+    };
     const AIR_VALVE_END = (n: number, av: { A_in: number; A_out: number }, face: JunctionFaceN) => {
         const C_air = avEndOn.has(n) ? prevState.C_gas[n] : 0.0;
         avEndOn.add(n);
-        const r = CALC_AIR_VALVE_N([face], prevState.V_g[n], C_air, prevState.Z[n], grid.dt, av.A_in, av.A_out);
-        newState.H[n] = r.H; newState.V_g[n] = r.V_g; newState.C_gas[n] = r.C_gas;
-        return r.Q[0];
+        return AIR_VALVE_STEP(n, av, C_air, [face])[0];
     };
 
     // Reservoir BC dispatch (E5′/R2/R3 — DESIGN §6): one entry per reservoir node with its incident
@@ -2186,13 +2190,11 @@ function runCore(
                     CALC_INTERIOR_DGCM(idx, coefs, prevState, newState, newFlow, grid, pipe.p);
                 } else {                                           // Q14 air valve (SECTION 7g)
                     const dxA = pipe.p.dx * pipe.p.A;
-                    const r = CALC_AIR_VALVE_N(
+                    const Q = AIR_VALVE_STEP(idx, av, prevState.C_gas[idx],
                         [{ C: coefs.Cp, B: coefs.B1, dxA, incoming: true },
-                         { C: coefs.Cm, B: coefs.B2, dxA, incoming: false }],
-                        prevState.V_g[idx], prevState.C_gas[idx], prevState.Z[idx], grid.dt, av.A_in, av.A_out);
-                    newState.H[idx] = r.H; newState.V_g[idx] = r.V_g; newState.C_gas[idx] = r.C_gas;
-                    newFlow.setQin(idx, r.Q[0]);
-                    newFlow.setQout(idx, r.Q[1]);
+                         { C: coefs.Cm, B: coefs.B2, dxA, incoming: false }]);
+                    newFlow.setQin(idx, Q[0]);
+                    newFlow.setQout(idx, Q[1]);
                 }
             }
         }
