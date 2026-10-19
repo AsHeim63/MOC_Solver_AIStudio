@@ -1365,7 +1365,7 @@ export default function App() {
                         Size air valves
                       </button>
                     </div>
-                    {avStudy && protectedShown && (
+                    {protectedShown && (
                       <div className="mt-4 text-xs">
                         {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
                           <p className="text-slate-500">No air valves needed: the minimum pressure stays at or above −1 m.</p>
