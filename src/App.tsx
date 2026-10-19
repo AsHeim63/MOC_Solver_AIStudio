@@ -1372,7 +1372,7 @@ export default function App() {
                         ) : (
                           <table className="w-full text-left">
                             <thead className="text-slate-400 uppercase text-[10px]">
-                              <tr><th className="py-1">Type</th><th>Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th></tr>
+                              <tr><th className="py-1">Type</th><th>Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th><th>Non-Slam</th></tr>
                             </thead>
                             <tbody>
                               {avStudy.valves.map(v => (
@@ -1380,6 +1380,7 @@ export default function App() {
                                   <td className="py-1">{v.nonSlam ? 'Non-Slam air valve' : 'Air valve'}</td>
                                   <td>{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
                                   <td>{v.inlet_mm} / {shownOutletMm(v)}</td>
+                                  <td>{v.nonSlam ? 'Yes' : 'No'}</td>
                                 </tr>
                               ))}
                             </tbody>
