@@ -15,10 +15,16 @@ export const AIR_VALVE_SIZES_MM: readonly number[] = [25, 50, 75, 100, 150, 200,
 export const NON_SLAM_OUTLET_MM = 12;
 export const MIN_GAUGE_HEAD_M   = -1;   // lowest allowed pressure with an air valve [m, gauge]
 
-/** A sized air valve: the solver's AirValveBC (x, inlet_mm, outlet_mm = 12, ruling 2) plus its shown type. */
+/** A sized air valve: the solver's AirValveBC (x, inlet_mm, outlet_mm = the COMPUTED outlet, 12 mm,
+ *  ruling 2) plus its shown type. A BOM reads outlet_mm for the computed size, shownOutletMm for the
+ *  screen. */
 export interface AirValve extends AirValveBC {
     nonSlam:   boolean;   // shown type: true ⟺ stage-2 air pocket > π·D² (ruling 2)
 }
+
+/** Outlet shown on the screen: a regular valve is shown as inlet / inlet, though computed with the
+ *  12 mm outlet (Assaf ruling 2026-10-16 (2)); a Non-Slam valve shows its computed outlet. */
+export const shownOutletMm = (v: AirValve): number => (v.nonSlam ? v.outlet_mm : v.inlet_mm);
 
 export interface AirValveStudy {
     stage1:     SimulationResults;   // unprotected run
@@ -46,19 +52,9 @@ function isSite(r: SimulationResults, i: number): boolean {
     return i === 0 || i === r.nodes.length - 1 || (z(i) > z(i - 1) && z(i) >= z(i + 1));
 }
 
-/** Largest whole air pocket of the valve at node n [m³]: the valve node plus the nodes it spilled
- *  into (contiguous, in the solver's spill direction: +x, −x from the line end; ruling 2026-10-18). */
-function pocketMax(r: SimulationResults, n: number, cap: (j: number) => number): number {
-    const dir = n === r.nodes.length - 1 ? -1 : 1;
-    let max = 0;
-    for (const s of r.fullHistory) {
-        const v = s.vapors ?? [];
-        let sum = v[n] ?? 0;   // the next node holds this pocket's air only while this one is full
-        for (let j = n; v[j] >= cap(j) * (1 - 1e-9) && j + dir >= 0 && j + dir < v.length; ) sum += v[j += dir];
-        if (sum > max) max = sum;
-    }
-    return max;
-}
+/** Largest whole air pocket of the valve at node n [m³], as the solver holds it (one gas body at
+ *  the valve node, ruling 2026-10-18): only this valve's air, never a neighbouring valve's spill. */
+const pocketMax = (r: SimulationResults, n: number): number => r.airPocketMax?.[n] ?? 0;
 
 /** Smallest pipe inner diameter at a node (both pipes at a junction). */
 function diameterAt(pipes: PipeSection[], x: number, half: number): number {
@@ -147,13 +143,7 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
     const half = stage1.nodes.length > 1 ? (stage1.nodes[1].x - stage1.nodes[0].x) / 2 : 0;
     for (const v of placed) {
         const D = diameterAt(inputs.pipes, xOf(v.node), half);
-        const cap = (j: number) => {   // the solver's dx·A at node j (a junction: the smaller pipe)
-            const nb = [j - 1, j + 1].filter(k => k >= 0 && k < stage2.nodes.length);
-            const h = Math.min(...nb.map(k => Math.abs(xOf(k) - xOf(j))));
-            const d = diameterAt(inputs.pipes, xOf(j), half);
-            return h * Math.PI * d * d / 4;
-        };
-        v.nonSlam = pocketMax(stage2, v.node, cap) > Math.PI * D * D;
+        v.nonSlam = pocketMax(stage2, v.node) > Math.PI * D * D;
     }
     return { stage1, stage2, valves: toValves(placed), unresolved: lowNodes(stage2).map(i => stage2.nodes[i].x) };
 }

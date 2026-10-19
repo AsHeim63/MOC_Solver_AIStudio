@@ -48,7 +48,7 @@ import { cn } from './lib/utils';
 import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
-import { sizeAirValves, AirValveStudy } from './air_valves';
+import { sizeAirValves, AirValveStudy, shownOutletMm } from './air_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
@@ -1349,7 +1349,7 @@ export default function App() {
                               {avStudy.valves.map(v => (
                                 <tr key={v.x} className="border-t border-slate-100">
                                   <td className="py-1">{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
-                                  <td>{v.inlet_mm} / {v.nonSlam ? v.outlet_mm : v.inlet_mm}</td><td>{v.nonSlam ? 'Yes' : 'No'}</td>
+                                  <td>{v.inlet_mm} / {shownOutletMm(v)}</td><td>{v.nonSlam ? 'Yes' : 'No'}</td>
                                 </tr>
                               ))}
                             </tbody>

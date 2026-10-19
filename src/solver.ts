@@ -90,6 +90,9 @@ export interface SimulationResults {
         endFlows?: { qFrom: number[]; qTo: number[] };
     }[];
     paths?: { id: string; nodeIndices: number[] }[];
+    // Q14: per node, the largest whole air pocket of the air valve at that node [m³] (0 elsewhere);
+    // only with air valves. The pocket is one gas body held at the valve node (spill ruling).
+    airPocketMax?: number[];
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2132,24 +2135,36 @@ function runCore(
     const avCap = avAt && NODE_SEGMENT_VOLUMES(layout);
     // Q14 spill + refill rulings (ANSWERS 2026-10-18): the pocket is one gas body, its whole volume
     // kept at the valve node in the state (gas law, CALC_AIR_VALVE_N); the results hold it as the
-    // valve node full (its dx·A) and the excess in the next nodes in the flow direction (+x; −x
-    // from the line end), each node up to its own dx·A. As the pocket shrinks, the farthest node
-    // refills first and the valve node last; the air leaves through the valve.
-    const reportVapors = (V: Float64Array): number[] => {
+    // valve node full (its dx·A) and the excess in the next nodes in the flow direction, each node
+    // up to its own dx·A. The direction is the sign of the flow at the valve node when the pocket
+    // first outgrows that node (+x at zero flow; −x from the line end), kept while it spills; at a
+    // line end or at another valve's node / spill the rest goes the other way. A spill never enters
+    // another valve's node or spill. Air left over then (no room up to the neighbouring valves or
+    // ends) is not shown at any node; the whole pocket per valve is in avPocket (airPocketMax). As
+    // the pocket shrinks, the farthest node refills first and the valve node last; the air leaves
+    // through the valve.
+    const avPocket = avAt && new Array<number>(totalNodes).fill(0);   // whole pocket, max over t [m³]
+    const avDir = new Map<number, number>();                           // spill direction per valve node
+    const reportVapors = (V: Float64Array, flow: FlowState): number[] => {
         const out = Array.from(V);
-        if (avAt === undefined || avCap === undefined) return out;
+        if (avAt === undefined || avCap === undefined || avPocket === undefined) return out;
+        const taken = new Set<number>(avAt.keys());
         for (const n of avAt.keys()) {
+            if (V[n] > avPocket[n]) avPocket[n] = V[n];
             let rest = out[n] - avCap[n];
-            if (!(rest > 0)) continue;
+            if (!(rest > 0)) { avDir.delete(n); continue; }
             out[n] = avCap[n];
-            const dir = n === totalNodes - 1 ? -1 : 1;
-            let j = n;
-            while (rest > 0 && j + dir >= 0 && j + dir < totalNodes) {
-                j += dir;
-                const put = Math.min(rest, Math.max(0, avCap[j] - out[j]));
-                out[j] += put; rest -= put;
+            let fwd = avDir.get(n);
+            if (fwd === undefined) {
+                fwd = n === totalNodes - 1 || flow.nodeQout(n) < 0 ? -1 : 1;
+                avDir.set(n, fwd);
             }
-            if (rest > 0) out[j] += rest;   // reached the line end: the rest stays at the end node
+            for (const dir of [fwd, -fwd]) {
+                for (let j = n + dir; rest > 0 && j >= 0 && j < totalNodes && !taken.has(j); j += dir) {
+                    const put = Math.min(rest, Math.max(0, avCap[j] - out[j]));
+                    out[j] += put; rest -= put; taken.add(j);
+                }
+            }
         }
         return out;
     };
@@ -2307,7 +2322,7 @@ function runCore(
         // 5. Advance state + update envelopes
         prevState.copyFrom(newState);
         prevFlow.copyFrom(newFlow);
-        const vapors = reportVapors(prevState.V_g);   // = V_g exactly without air valves
+        const vapors = reportVapors(prevState.V_g, prevFlow);   // = V_g exactly without air valves
         for (let i = 0; i < totalNodes; i++) {
             if (newState.H[i]   > maxH[i]) maxH[i] = newState.H[i];
             if (newState.H[i]   < minH[i]) minH[i] = newState.H[i];
@@ -2399,7 +2414,8 @@ function runCore(
         ? [{ id: layout.pipeParams[0].startNode.toString(), nodeIndices: Array.from({ length: totalNodes }, (_, i) => i) }]
         : undefined;
 
-    return { timeSteps, nodes, timeHistory, fullHistory, paths };
+    return { timeSteps, nodes, timeHistory, fullHistory, paths,
+             ...(avPocket !== undefined && { airPocketMax: avPocket }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
