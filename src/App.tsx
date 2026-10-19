@@ -189,6 +189,16 @@ export default function App() {
   const [results, setResults] = useState<SimulationResults | null>(null);
   // Q14: air valve study (stage 1 unprotected, stage 2 protected); null until "Size air valves".
   const [avStudy, setAvStudy] = useState<AirValveStudy | null>(null);
+  // Q15: device package approved in the user preferences (air valves = the only device type now).
+  // Not approved -> no protected results are shown.
+  const [avApproved, setAvApproved] = useState<boolean>(() => {
+    try { return localStorage.getItem('hg_pkg_air_valves') === '1'; } catch { return false; }
+  });
+  const approveAirValves = (on: boolean) => {
+    setAvApproved(on);
+    try { localStorage.setItem('hg_pkg_air_valves', on ? '1' : '0'); } catch { /* storage blocked */ }
+    if (!on && avStudy) { setIsAnimating(false); setResults(avStudy.stage1); setAvStudy(null); }
+  };
   const [isSimulating, setIsSimulating] = useState(false);
 
     // ── Scenario control (Row 3.11 Unit C, D-7 — ruling R1) ───────────────────
@@ -676,6 +686,7 @@ export default function App() {
 
   // Q14: every later stage keeps the stage-1 (unprotected) axis scale.
   const scaleResults = avStudy?.stage1 ?? results;
+  const protectedShown = !!avStudy && results === avStudy.stage2;   // Q15 heading
   const yAxisDomain = useMemo(() => {
     if (!scaleResults) return ['auto', 'auto'] as [any, any];
     const minYValue = Math.min(...scaleResults.nodes.map(n => Math.min(n.elevation, n.minHead)));
@@ -1108,6 +1119,20 @@ export default function App() {
             </div>
           </section>
 
+          {/* Q15: user preferences — the approved device package */}
+          <section className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-3 text-blue-600">
+              <Settings2 size={18} />
+              <h2 className="font-bold text-sm uppercase tracking-wider">Preferences</h2>
+            </div>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Device package</p>
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-700">
+              <input type="checkbox" checked={avApproved} onChange={e => approveAirValves(e.target.checked)}
+                className="accent-blue-600" />
+              Air valves
+            </label>
+          </section>
+
           {/* Boundary Conditions (Row 3.11 Unit C, D-4 — S68) ─────────────────────────────
               REPLACES the "Downstream Reservoir / Water Level Elevation" panel, which was
               drawn on EVERY scenario but read only by a pump trip. On a valve run it sat
@@ -1282,6 +1307,9 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   className="space-y-8"
                 >
+                  {/* Q15: stage-1 results = Unprotected System; results with devices = Protected System */}
+                  <h2 className="text-xl font-black text-slate-900">{protectedShown ? 'Protected System' : 'Unprotected System'}</h2>
+
                   {/* Summary Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center gap-4">
@@ -1319,12 +1347,13 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Q14: air valves (solver stage 2) */}
+                  {/* Q14/Q15: air valves (solver stage 2), only when approved in the preferences */}
+                  {avApproved && (
                   <section data-q14="air-valves" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">Air Valves</h3>
-                      {avStudy && ([[avStudy.stage1, 'Stage 1 (unprotected)'],
-                                    [avStudy.stage2, 'Stage 2 (with air valves)']] as const).map(([r, label]) => (
+                      {avStudy && ([[avStudy.stage1, 'Unprotected System'],
+                                    [avStudy.stage2, 'Protected System']] as const).map(([r, label]) => (
                         <button key={label} onClick={() => { setIsAnimating(false); setResults(r); }}
                           className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold border",
                             results === r ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200")}>
@@ -1336,20 +1365,21 @@ export default function App() {
                         Size air valves
                       </button>
                     </div>
-                    {avStudy && (
+                    {avStudy && protectedShown && (
                       <div className="mt-4 text-xs">
                         {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
                           <p className="text-slate-500">No air valves needed: the minimum pressure stays at or above −1 m.</p>
                         ) : (
                           <table className="w-full text-left">
                             <thead className="text-slate-400 uppercase text-[10px]">
-                              <tr><th className="py-1">Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th><th>Non-Slam</th></tr>
+                              <tr><th className="py-1">Type</th><th>Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th></tr>
                             </thead>
                             <tbody>
                               {avStudy.valves.map(v => (
                                 <tr key={v.x} className="border-t border-slate-100">
-                                  <td className="py-1">{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
-                                  <td>{v.inlet_mm} / {shownOutletMm(v)}</td><td>{v.nonSlam ? 'Yes' : 'No'}</td>
+                                  <td className="py-1">{v.nonSlam ? 'Non-Slam air valve' : 'Air valve'}</td>
+                                  <td>{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
+                                  <td>{v.inlet_mm} / {shownOutletMm(v)}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -1361,6 +1391,7 @@ export default function App() {
                       </div>
                     )}
                   </section>
+                  )}
 
                   {/* Pressure Envelope & Animation */}
                   <section className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden">
