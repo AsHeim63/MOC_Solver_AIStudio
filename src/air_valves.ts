@@ -113,14 +113,14 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
             for (const j of grow) placed[j].k++;
             r = run(placed);
         }
+        let was = new Set(lowNodes(r));
         for (let changed = true; changed;) {
             changed = false;
             for (const v of placed) {
                 if (v.k === 0) continue;
-                const was = new Set(lowNodes(r));
                 v.k--;
-                const r2 = run(placed);
-                if (lowNodes(r2).every(i => was.has(i))) { r = r2; changed = true; } else v.k++;
+                const r2 = run(placed), low2 = lowNodes(r2);
+                if (low2.every(i => was.has(i))) { r = r2; was = new Set(low2); changed = true; } else v.k++;
             }
         }
         return r;
@@ -145,5 +145,5 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
         const D = diameterAt(inputs.pipes, xOf(v.node), half);
         v.nonSlam = pocketMax(stage2, v.node) > Math.PI * D * D;
     }
-    return { stage1, stage2, valves: toValves(placed), unresolved: lowNodes(stage2).map(i => stage2.nodes[i].x) };
+    return { stage1, stage2, valves: toValves(placed), unresolved: lowNodes(stage2).map(xOf) };
 }
