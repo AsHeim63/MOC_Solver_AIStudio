@@ -46,7 +46,7 @@ const round1 = (x: number): number => Math.round(x * 10) / 10;
 /** Minimum gauge pressure at node i [m]. */
 const minGauge = (r: SimulationResults, i: number): number => r.nodes[i].minHead - r.nodes[i].elevation;
 
-/** A valve node misses −1 m. */
+/** Node i is below −1 m, the valve-node limit. */
 const valveLow = (r: SimulationResults, i: number): boolean => minGauge(r, i) < MIN_GAUGE_HEAD_M;
 
 /** Valves whose own node is below −1 m. */
@@ -103,7 +103,7 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
         if (sites.every(s => Math.abs(s - p.x) > VALVE_SPACING_M)) sites.push(p.x);
     }
     if (scenario !== 'pump-trip' && sites.every(s => Math.abs(s - L) >= VALVE_SPACING_M)) sites.push(L);
-    for (const x of sites) if (minGauge(stage1, nodeAt(x)) < MIN_GAUGE_HEAD_M) place(x);
+    for (const x of sites) if (valveLow(stage1, nodeAt(x))) place(x);
 
     // Size (ruling (2)): grow every valve whose own node is below −1 m one step, all together, until
     // none is (or those are at the largest size). Then each valve that meets −1 m takes the smallest
@@ -136,8 +136,8 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
     // valve at the lowest such node and size all again. Points with no free place are reported.
     let stage2 = fit();
     for (;;) {
-        const free = stage2.nodes.map((_, i) => i).filter(i => placed.every(v => Math.abs(xOf(i) - v.x) >= VALVE_SPACING_M));
-        const deep = free.filter(i => minGauge(stage2, i) <= ADD_VALVE_HEAD_M);
+        const deep = stage2.nodes.map((_, i) => i).filter(i => minGauge(stage2, i) <= ADD_VALVE_HEAD_M &&
+            placed.every(v => Math.abs(xOf(i) - v.x) >= VALVE_SPACING_M));
         if (!deep.length) break;
         place(xOf(deep.reduce((a, b) => (minGauge(stage2, b) < minGauge(stage2, a) ? b : a))));
         stage2 = fit();

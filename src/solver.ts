@@ -2137,9 +2137,9 @@ function runCore(
     // Q14 ruling 3: a line-end air valve acts while its end is a dead end (pump stopped / valve shut
     // — SECTION 7g, DC-5), and (Q16, ANSWERS 2026-10-22 "opens instantly") at the line start while a
     // built-in-curve pump (no user curve: pump trip, or the no-curve pump-fed valve) still runs, once
-    // the pump BC puts the node below atmospheric or air is still in the pocket. There the pump inflow is the pump curve evaluated ONCE at the node's previous-step
-    // head (single pass, as the cavitation branch evaluates it at H_vap — no joint gas-law + pump-curve
-    // solve, DC-5), then fed to the air node as a known inflow. Air carries over only while a pocket is
+    // the pump BC puts the node below atmospheric or air is still in the pocket. There the pump
+    // inflow is the pump curve evaluated ONCE at the node's previous-step head (single pass, as the
+    // cavitation branch evaluates it at H_vap — no joint gas-law + pump-curve solve, DC-5), then fed to the air node as a known inflow. Air carries over only while a pocket is
     // held (avAir); otherwise the end BC's C_gas is DGCM memory (DOMAIN §4/§7, kept after collapse),
     // not air that entered.
     const avAir = new Set<number>();
