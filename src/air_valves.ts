@@ -47,19 +47,15 @@ const round1 = (x: number): number => Math.round(x * 10) / 10;
 /** Minimum gauge pressure at node i [m]. */
 const minGauge = (r: SimulationResults, i: number): number => r.nodes[i].minHead - r.nodes[i].elevation;
 
+/** A valve node misses −1 m. */
+const valveLow = (r: SimulationResults, i: number): boolean => minGauge(r, i) < MIN_GAUGE_HEAD_M - TARGET_TOL_M;
+
 /** Valves whose own node is below −1 m. */
-const valveMisses = (r: SimulationResults, vs: Placed[]): Placed[] =>
-    vs.filter(v => minGauge(r, v.node) < MIN_GAUGE_HEAD_M - TARGET_TOL_M);
+const valveMisses = (r: SimulationResults, vs: Placed[]): Placed[] => vs.filter(v => valveLow(r, v.node));
 
 /** Nodes missing the Q16 target: a valve node below −1 m, any other node at −8 m or lower. */
-function misses(r: SimulationResults, valveNodes: ReadonlySet<number>): number[] {
-    const out: number[] = [];
-    r.nodes.forEach((_, i) => {
-        const p = minGauge(r, i);
-        if (valveNodes.has(i) ? p < MIN_GAUGE_HEAD_M - TARGET_TOL_M : p <= ADD_VALVE_HEAD_M) out.push(i);
-    });
-    return out;
-}
+const misses = (r: SimulationResults, valveNodes: ReadonlySet<number>): number[] =>
+    r.nodes.map((_, i) => i).filter(i => (valveNodes.has(i) ? valveLow(r, i) : minGauge(r, i) <= ADD_VALVE_HEAD_M));
 
 /** Largest whole air pocket of the valve at node n [m³], as the solver holds it (one gas body at
  *  the valve node, ruling 2026-10-18): only this valve's air, never a neighbouring valve's spill. */
