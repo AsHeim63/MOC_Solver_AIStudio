@@ -39,7 +39,6 @@ interface Placed { x: number; node: number; k: number; nonSlam: boolean }
 
 export const ADD_VALVE_HEAD_M = -8;    // Q16 ruling (4): a line node at or below this gets a valve [m, gauge]
 export const VALVE_SPACING_M  = 150;   // Q16 placement: least distance between valves [m]
-export const TARGET_TOL_M     = 0.05;  // a valve node within this of −1 m meets it [m] (ANSWERS 2026-10-14 2 % rule)
 
 /** Positions are given to one decimal (Q16 placement). */
 const round1 = (x: number): number => Math.round(x * 10) / 10;
@@ -48,7 +47,7 @@ const round1 = (x: number): number => Math.round(x * 10) / 10;
 const minGauge = (r: SimulationResults, i: number): number => r.nodes[i].minHead - r.nodes[i].elevation;
 
 /** A valve node misses −1 m. */
-const valveLow = (r: SimulationResults, i: number): boolean => minGauge(r, i) < MIN_GAUGE_HEAD_M - TARGET_TOL_M;
+const valveLow = (r: SimulationResults, i: number): boolean => minGauge(r, i) < MIN_GAUGE_HEAD_M;
 
 /** Valves whose own node is below −1 m. */
 const valveMisses = (r: SimulationResults, vs: Placed[]): Placed[] => vs.filter(v => valveLow(r, v.node));
@@ -88,8 +87,10 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
 
     // Sites in the ruled order (ANSWERS 2026-10-21 "Q16 placement"): (a) right after the pump check
     // valve (node 0); (b) slope-break peaks of the pipe table (slope before > slope after), highest
-    // first, each more than VALVE_SPACING_M from the sites before it; (c) right before the line-end
-    // valve, unless a site is closer than VALVE_SPACING_M. A site gets a valve only where stage 1 is
+    // first, each more than VALVE_SPACING_M from the sites before it — the sites, not only the valves
+    // placed: "if two candidates are closer than 150 m, always the higher one"; (c) right before the
+    // line-end valve, unless a site is closer than VALVE_SPACING_M (the app has no mid-line valve, so
+    // (c)'s "both sides of a mid-line valve" has no case). A site gets a valve only where stage 1 is
     // below −1 m there (Q14 Do (3)).
     const pts = [{ x: 0, z: stage1.nodes[0].elevation }];
     for (const p of inputs.pipes) pts.push({ x: pts[pts.length - 1].x + p.length, z: p.endElevation });
@@ -105,8 +106,9 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
     for (const x of sites) if (minGauge(stage1, nodeAt(x)) < MIN_GAUGE_HEAD_M) place(x);
 
     // Size (ruling (2)): grow every valve whose own node is below −1 m one step, all together, until
-    // none is (or those are at the largest size). Then each valve that meets −1 m goes one step down
-    // while no valve node that met −1 m drops below it (smallest size per valve).
+    // none is (or those are at the largest size). Then each valve that meets −1 m takes the smallest
+    // size, tried from 25 mm up, at which no valve node that met −1 m drops below it (the others held);
+    // repeated until no valve changes. Smallest per valve; the joint set is not searched (11^n runs).
     const fit = (): SimulationResults => {
         let r = run(placed);
         for (;;) {
@@ -120,9 +122,11 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
             for (const v of placed) {
                 const was = valveMisses(r, placed);
                 if (v.k === 0 || was.includes(v)) continue;
-                v.k--;
-                const r2 = run(placed);
-                if (valveMisses(r2, placed).every(w => was.includes(w))) { r = r2; changed = true; } else v.k++;
+                const k0 = v.k;
+                for (v.k = 0; v.k < k0; v.k++) {
+                    const r2 = run(placed);
+                    if (valveMisses(r2, placed).every(w => was.includes(w))) { r = r2; changed = true; break; }
+                }
             }
         }
         return r;

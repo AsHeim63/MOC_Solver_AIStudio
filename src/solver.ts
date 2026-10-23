@@ -989,8 +989,10 @@ export function CALC_JUNCTION_DGCM_N(
 /**
  * BOX: CALC_AIR_VALVE_N — air valve (air inlet/outlet) at an interior or junction node (Q14).
  * Also at a line end while that end is a dead end (pump stopped / valve shut, ruling 3): one face,
- * the DC-5 stopped-branch geometry. While the pump runs or the valve passes flow, the end BC runs
- * unchanged and the air valve stays closed — DC-5 forbids a joint gas-law + pump-curve + C− solve.
+ * the DC-5 stopped-branch geometry. At the line start while the built-in-curve pump runs (Q16), the
+ * pump inflow is a known Q_feed — the curve evaluated once at the previous-step head (single pass;
+ * DC-5 forbids a joint gas-law + pump-curve + C− solve). While a user-curve pump runs or the end
+ * valve passes flow, the end BC runs unchanged and the air valve stays closed.
  *
  * Wylie & Streeter, Fluid Transients in Systems (1993) §3.6: air enters through the inlet orifice
  * while the line is below atmospheric, is trapped as a pocket that follows the isothermal gas law,
@@ -1093,7 +1095,8 @@ export function CALC_AIR_VALVE_N(
 
 /** Q14: map each air valve to its nearest mesh node (x as in the result nodes). An end node is
  *  accepted (ruling 3): runCore lets it act while that end is a dead end (pump stopped / valve
- *  shut); at a constant-head reservoir the head is fixed, so the valve has no effect there. */
+ *  shut) and (Q16) at the line start while the built-in-curve pump runs; at a constant-head
+ *  reservoir the head is fixed, so the valve has no effect there. */
 function AIR_VALVE_NODES(
     layout: MeshLayout, airValves: AirValveBC[]
 ): Map<number, { A_in: number; A_out: number }> {
@@ -1130,15 +1133,22 @@ function PUMP_ALPHA(pump: PumpParams, t: number): number {
         ? Math.max(0.0, 1.0 - (t - pump.tripTime) / (pump.haltTime - pump.tripTime)) : 1.0;
 }
 
-/** Q16: built-in (pump-trip) curve flow at a known discharge head H [m³/s], check valve: Q ≥ 0.
- *  Same curve as CALC_BC_PUMP_DGCM's running branch (DOMAIN §5): α²·Hs − k·Q² = H. */
+// ── 7c: Pump boundary (left end, node 0) ─────────────────────────────────────
+/** SECTION 7c: the built-in pump curve α²·Hs − k·Q² = H (DOMAIN §5), Hs = HS_FACTOR·steadyHead,
+ *  k = Hs/Qmax², Qmax = QMAX_FACTOR·Q0 — the one place it is defined (CALC_BC_PUMP_DGCM, PUMP_TRIP_Q_AT). */
+function PUMP_TRIP_CURVE(pump: PumpParams, steadyHead: number): { Hs: number; k: number } {
+    const Hs = HS_FACTOR * steadyHead, Qmax = QMAX_FACTOR * pump.initialFlow;
+    return { Hs, k: Hs / (Qmax * Qmax) };
+}
+
+/** SECTION 7c (Q16): built-in curve flow at a known discharge head H [m³/s], check valve: Q ≥ 0.
+ *  Feeds the line-start air valve while the built-in-curve pump runs (runCore, SECTION 7g). */
 function PUMP_TRIP_Q_AT(pump: PumpParams, steadyHead: number, alpha: number, H: number): number {
-    const Hs = HS_FACTOR * steadyHead, Qmax = QMAX_FACTOR * pump.initialFlow, k = Hs / (Qmax * Qmax);
+    const { Hs, k } = PUMP_TRIP_CURVE(pump, steadyHead);
     const hd = alpha * alpha * Hs - H;
     return hd > 0.0 ? Math.sqrt(hd / k) : 0.0;
 }
 
-// ── 7c: Pump boundary (left end, node 0) ─────────────────────────────────────
 /**
  * BOX: CALC_BC_PUMP_DGCM
  *
@@ -1282,9 +1292,7 @@ function CALC_BC_PUMP_DGCM(
         //   Step 1 — Liquid solution: k_pump·Q² + B·Q + (Cm − α²·Hs) = 0, take Q >= 0.
         //   Step 2 — Regime: H_liq >= H_vap → LIQUID (H = H_liq, V_g reset to 1e-12);
         //            else → CAVITATION (H pinned at H_vap; DGCM mass balance on V_g).
-        const Hs     = 1.33 * steadyHead;
-        const Qmax   = 2.0 * pump.initialFlow;
-        const k_pump = Hs / (Qmax * Qmax);
+        const { Hs, k: k_pump } = PUMP_TRIP_CURVE(pump, steadyHead);
 
         const H_vap     = Z + VAPOR_H_REL;
         const H_abs_vap = H_BARO + VAPOR_H_REL;
@@ -2127,9 +2135,9 @@ function runCore(
     const grid: GridParams   = { dt: baseDt };
     const avAt = airValves?.length ? AIR_VALVE_NODES(layout, airValves) : undefined;   // Q14
     // Q14 ruling 3: a line-end air valve acts while its end is a dead end (pump stopped / valve shut
-    // — SECTION 7g, DC-5), and (Q16, ANSWERS 2026-10-22 "opens instantly") at the line start while the
-    // pump-trip pump still runs, once the pump BC puts the node below atmospheric or air is still in
-    // the pocket. There the pump inflow is the pump curve evaluated ONCE at the node's previous-step
+    // — SECTION 7g, DC-5), and (Q16, ANSWERS 2026-10-22 "opens instantly") at the line start while a
+    // built-in-curve pump (no user curve: pump trip, or the no-curve pump-fed valve) still runs, once
+    // the pump BC puts the node below atmospheric or air is still in the pocket. There the pump inflow is the pump curve evaluated ONCE at the node's previous-step
     // head (single pass, as the cavitation branch evaluates it at H_vap — no joint gas-law + pump-curve
     // solve, DC-5), then fed to the air node as a known inflow. Air carries over only while a pocket is
     // held (avAir); otherwise the end BC's C_gas is DGCM memory (DOMAIN §4/§7, kept after collapse),
@@ -2242,7 +2250,7 @@ function runCore(
             } else {
                 CALC_BC_PUMP_DGCM(0, coefsPump, prevState, newState, newFlow, grid, pump, pumpHead, t, pipes[0].p);
                 if (av0 !== undefined && pump.curve === undefined &&
-                    (newState.H[0] < prevState.Z[0] || avAir.has(0))) {   // Q16: running pump, air valve
+                    (newState.H[0] < prevState.Z[0] || avAir.has(0))) {   // Q16: built-in-curve pump running, air valve
                     const Q_feed = PUMP_TRIP_Q_AT(pump, pumpHead, PUMP_ALPHA(pump, t), prevState.H[0]);
                     newFlow.setQin(0, Q_feed);
                     newFlow.setQout(0, AIR_VALVE_END(0, av0,
@@ -2530,9 +2538,9 @@ const GGA_TOL_ENERGY = 1e-10;   // energy stop      [m]    (a decade under DoD 1
 const GGA_MAX_ITER   = 100;     // iteration cap → throw (no silent fallback)
 const Q_LAM          = 1e-6;    // laminar Jacobian-diagonal floor [m³/s] (DESIGN §4)
 const GGA_PIVOT_MIN  = 1e-14;   // LDLᵀ pivot guard → throw
-const HS_FACTOR      = 1.33;    // pump curve Hs = 1.33·steadyHead (DOMAIN §5). The
-                                // production literal in CALC_BC_PUMP_DGCM is the
-                                // gate-locked source convention; named here for 9.6.
+const HS_FACTOR      = 1.33;    // pump curve Hs = 1.33·steadyHead (DOMAIN §5); used by
+                                // 9.6 and SECTION 7c PUMP_TRIP_CURVE (Q16: the former
+                                // CALC_BC_PUMP_DGCM literal, same value, hashes unchanged).
 const QMAX_FACTOR    = 2.0;     // pump curve run-out flow Qmax = 2·Q0 (DOMAIN §5)
 
 /**

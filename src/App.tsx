@@ -48,7 +48,7 @@ import { cn } from './lib/utils';
 import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './types';
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
-import { sizeAirValves, AirValveStudy, shownOutletMm } from './air_valves';
+import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
@@ -1387,7 +1387,7 @@ export default function App() {
                           </table>
                         )}
                         {avStudy.unresolved.length > 0 && (
-                          <p className="mt-2 text-amber-700">Target not met (valve −1 m, line −8 m) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
+                          <p className="mt-2 text-amber-700">Target not met (valve {MIN_GAUGE_HEAD_M} m, line {ADD_VALVE_HEAD_M} m) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
                         )}
                       </div>
                     )}
