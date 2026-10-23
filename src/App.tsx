@@ -50,6 +50,7 @@ import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
+import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -1502,6 +1503,10 @@ export default function App() {
                             <Line name="Steady-State" type="linear" dataKey="steadyHead" stroke="#94a3b8" strokeWidth={1} dot={false} strokeDasharray="3 3" isAnimationActive={false} />
                             <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                             <Line name="Current HGL" type="linear" dataKey="currentHead" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 2 }} isAnimationActive={false} />
+                            {results && results.nodes.length > 1 && (
+                              <ProfileIcons pts={results.nodes.map(n => ({ x: n.x, z: n.elevation }))}
+                                icons={profileIcons(scenario, results.nodes[results.nodes.length - 1].x, protectedShown ? avStudy.valves : [])} />
+                            )}
                           </LineChart>
                         </ResponsiveContainer>
                       </div>
@@ -1725,6 +1730,10 @@ export default function App() {
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
                   <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
+                  {gateChart.length > 1 && (
+                    <ProfileIcons pts={gateChart.map(p => ({ x: p.distance, z: p.elevation }))}
+                      icons={profileIcons(scenario, gateChart[gateChart.length - 1].distance)} />
+                  )}
                 </LineChart>
               </ResponsiveContainer>
             </div>

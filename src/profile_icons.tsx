@@ -1,0 +1,65 @@
+// ── Q17: device icons on the pipeline profile charts (display only) ─────────────────────────────────
+// Pictures: builder/inputs/Q17_icons/1..5. Pump, tank and valve sit on the Pipeline line; air valves sit
+// above it, the stem's foot touching it. Each icon is one <g data-q17=kind data-x=x>.
+import { useXAxisScale, useYAxisScale } from 'recharts';
+import type { Scenario } from './scenario_dispatch';
+
+export type ProfileIconKind = 'air-valve' | 'air-valve-ns' | 'pump' | 'tank' | 'valve';
+export interface ProfileIcon { kind: ProfileIconKind; x: number }
+
+/** The devices the current app models: the scenario's two line ends, plus any placed air valves. */
+export function profileIcons(scenario: Scenario, L: number, airValves: { x: number; nonSlam: boolean }[] = []): ProfileIcon[] {
+  const ends: ProfileIcon[] = scenario === 'pump-trip' ? [{ kind: 'pump', x: 0 }, { kind: 'tank', x: L }]
+    : scenario === 'gravity-valve' ? [{ kind: 'tank', x: 0 }, { kind: 'valve', x: L }]
+    : [{ kind: 'pump', x: 0 }, { kind: 'valve', x: L }];
+  return [...ends, ...airValves.map(v => ({ kind: (v.nonSlam ? 'air-valve-ns' : 'air-valve') as ProfileIconKind, x: v.x }))];
+}
+
+const S = '#1e293b';
+function Glyph({ kind }: { kind: ProfileIconKind }) {
+  switch (kind) {
+    case 'pump':
+      return (<><circle r={8} fill="#fff" stroke={S} strokeWidth={2} /><path d="M-3,-5 L5,0 L-3,5 Z" fill={S} /></>);
+    case 'tank':
+      return (<><rect x={-8} y={-11} width={16} height={22} fill="#f1f5f9" stroke={S} strokeWidth={2} />
+        <line x1={-8} y1={-5} x2={8} y2={-5} stroke={S} strokeWidth={1} />
+        <path d="M-4,-3 L0,-3 L-3,-1 L1,-1" fill="none" stroke={S} strokeWidth={0.8} /></>);
+    case 'valve':
+      return (<><path d="M-9,-6 L9,6 L9,-6 L-9,6 Z" fill={S} /><line x1={0} y1={0} x2={0} y2={-9} stroke={S} strokeWidth={1.5} />
+        <rect x={-4} y={-15} width={8} height={6} fill="#fff" stroke={S} strokeWidth={1.5} /></>);
+    default: {   // air valve: stem foot at y = 0, circle above it, triangle on top
+      const ns = kind === 'air-valve-ns';
+      return (<><line x1={0} y1={0} x2={0} y2={-8} stroke={S} strokeWidth={1.5} />
+        <circle cy={-15} r={7} fill="#fff" stroke={S} strokeWidth={1.5} />
+        <text y={-12.5} textAnchor="middle" fontSize={ns ? 6.5 : 8} fontWeight={700} fill={S}>{ns ? 'NS' : 'C'}</text>
+        <path d="M-7,-30 L7,-30 L0,-22 Z" fill="#fff" stroke={S} strokeWidth={1.5} />
+        {ns && <path d="M-3.5,-28.5 L3.5,-28.5 L0,-25 Z" fill="none" stroke={S} strokeWidth={1} />}</>);
+    }
+  }
+}
+
+/** Child of a recharts LineChart. pts = the Pipeline line's points (x = the X-axis value, z = elevation). */
+export function ProfileIcons({ pts, icons }: { pts: { x: number; z: number }[]; icons: ProfileIcon[] }) {
+  const xs = useXAxisScale(), ys = useYAxisScale();
+  if (!xs || !ys || pts.length < 2) return null;
+  // Pixel position on the drawn line: the line is straight in pixels between its points, so interpolate there.
+  const at = (x: number) => {
+    let i = pts.findIndex(p => p.x >= x); if (i <= 0) i = i === 0 ? 1 : pts.length - 1;
+    const a = pts[i - 1], b = pts[i], t = b.x === a.x ? 1 : Math.min(1, Math.max(0, (x - a.x) / (b.x - a.x)));
+    const ax = xs(a.x), bx = xs(b.x), ay = ys(a.z), by = ys(b.z);
+    if (ax === undefined || bx === undefined || ay === undefined || by === undefined) return null;
+    return { px: ax + (bx - ax) * t, py: ay + (by - ay) * t };
+  };
+  return (
+    <g pointerEvents="none">
+      {icons.map(ic => {
+        const p = at(ic.x);
+        return p && (
+          <g key={`${ic.kind}@${ic.x}`} data-q17={ic.kind} data-x={ic.x} transform={`translate(${p.px},${p.py})`}>
+            <Glyph kind={ic.kind} />
+          </g>
+        );
+      })}
+    </g>
+  );
+}
