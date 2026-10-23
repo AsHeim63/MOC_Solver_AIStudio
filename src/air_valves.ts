@@ -1,9 +1,11 @@
 // ── air_valves.ts — Q14: air valve study (solver stage 2) ───────────────────────────────────────
 //
-// Stage 1 = today's transient run, unprotected. Then: an air valve at every high point whose
-// stage-1 minimum pressure is below −1 m (gauge), and at a line end (inlet of the first pipe, or
-// the downstream valve inlet) below −1 m (ruling 3, 2026-10-16); each inlet sized to the smallest
-// orifice from the set that keeps the line at or above −1 m (ruling 1). Every valve is computed
+// Stage 1 = today's transient run, unprotected. Then valves at the sites of the Q16 placement ruling
+// (ANSWERS 2026-10-21: (a) after the pump check valve, (b) slope-break peaks, (c) before the line-end
+// valve) where stage 1 is below −1 m (gauge). Each inlet is the smallest orifice from the set that
+// keeps ITS OWN node at or above −1 m (Q16 final ruling 2026-10-22 (2)). Line pressures below −2 m
+// are ignored unless a node reaches −8 m or lower; then a valve is added at the lowest such point at
+// least 150 m from every valve, all are sized again, and this repeats (ruling (4)). Every valve is computed
 // with a 12 mm outlet; it is shown as Non-Slam only when its air pocket grows beyond π·D², else as
 // a regular air valve (ruling 2). The final protected run is stage 2. Both runs are kept.
 // The air-valve boundary itself is the solver's CALC_AIR_VALVE_N (solver.ts SECTION 7g).
@@ -30,26 +32,33 @@ export interface AirValveStudy {
     stage1:     SimulationResults;   // unprotected run
     stage2:     SimulationResults;   // final protected run
     valves:     AirValve[];
-    unresolved: number[];            // x [m] of points still below −1 m in stage 2
+    unresolved: number[];            // x [m] of points still missing the Q16 target in stage 2
 }
 
-interface Placed { node: number; k: number; nonSlam: boolean }
+interface Placed { x: number; node: number; k: number; nonSlam: boolean }
+
+export const ADD_VALVE_HEAD_M = -8;    // Q16 ruling (4): a line node at or below this gets a valve [m, gauge]
+export const VALVE_SPACING_M  = 150;   // Q16 placement: least distance between valves [m]
+export const TARGET_TOL_M     = 0.05;  // a valve node within this of −1 m meets it [m] (ANSWERS 2026-10-14 2 % rule)
+
+/** Positions are given to one decimal (Q16 placement). */
+const round1 = (x: number): number => Math.round(x * 10) / 10;
 
 /** Minimum gauge pressure at node i [m]. */
 const minGauge = (r: SimulationResults, i: number): number => r.nodes[i].minHead - r.nodes[i].elevation;
 
-/** Nodes whose minimum gauge pressure is below −1 m. */
-function lowNodes(r: SimulationResults): number[] {
-    const out: number[] = [];
-    r.nodes.forEach((_, i) => { if (minGauge(r, i) < MIN_GAUGE_HEAD_M) out.push(i); });
-    return out;
-}
+/** Valves whose own node is below −1 m. */
+const valveMisses = (r: SimulationResults, vs: Placed[]): Placed[] =>
+    vs.filter(v => minGauge(r, v.node) < MIN_GAUGE_HEAD_M - TARGET_TOL_M);
 
-/** Valve site = interior high point (higher than the node before it and not lower than the node
- *  after it: the first node of a flat top), or a line end (ruling 3). */
-function isSite(r: SimulationResults, i: number): boolean {
-    const z = (j: number) => r.nodes[j].elevation;
-    return i === 0 || i === r.nodes.length - 1 || (z(i) > z(i - 1) && z(i) >= z(i + 1));
+/** Nodes missing the Q16 target: a valve node below −1 m, any other node at −8 m or lower. */
+function misses(r: SimulationResults, valveNodes: ReadonlySet<number>): number[] {
+    const out: number[] = [];
+    r.nodes.forEach((_, i) => {
+        const p = minGauge(r, i);
+        if (valveNodes.has(i) ? p < MIN_GAUGE_HEAD_M - TARGET_TOL_M : p <= ADD_VALVE_HEAD_M) out.push(i);
+    });
+    return out;
 }
 
 /** Largest whole air pocket of the valve at node n [m³], as the solver holds it (one gas body at
@@ -69,81 +78,74 @@ function diameterAt(pipes: PipeSection[], x: number, half: number): number {
 export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirValveStudy {
     const base: DispatchInputs = { ...inputs, airValves: undefined };
     const stage1 = dispatchSimulation(scenario, base);
-    const low1 = lowNodes(stage1);
     const last = AIR_VALVE_SIZES_MM.length - 1;
     const xOf = (i: number) => stage1.nodes[i].x;
-    const toValves = (vs: Placed[]): AirValve[] => vs.map(v => {
-        const d = AIR_VALVE_SIZES_MM[v.k];
-        return { x: xOf(v.node), inlet_mm: d, outlet_mm: NON_SLAM_OUTLET_MM, nonSlam: v.nonSlam };
-    });
+    const nodeAt = (x: number) => stage1.nodes.reduce((b, n, i) => (Math.abs(n.x - x) < Math.abs(xOf(b) - x) ? i : b), 0);
+    const toValves = (vs: Placed[]): AirValve[] => vs.map(v => ({
+        x: v.x, inlet_mm: AIR_VALVE_SIZES_MM[v.k], outlet_mm: NON_SLAM_OUTLET_MM, nonSlam: v.nonSlam }));
     const run = (vs: Placed[]) => dispatchSimulation(scenario, { ...base, airValves: toValves(vs) });
-
-    const placed: Placed[] = low1.filter(i => isSite(stage1, i)).map(node => ({ node, k: 0, nonSlam: false }));
-    if (!placed.length) return { stage1, stage2: run([]), valves: [], unresolved: low1.map(xOf) };
-
-    // A low node belongs to the nearest valve in its stage-1 low stretch (a contiguous run of low
-    // nodes); low nodes with no valve in their stretch are reported, never "fixed" by a far valve.
-    const lowSet = new Set(low1);
-    const stretch = new Map<number, number>();            // node -> stretch id
-    let sid = -1;
-    for (let i = 0; i < stage1.nodes.length; i++) if (lowSet.has(i)) {
-        if (!lowSet.has(i - 1)) sid++;
-        stretch.set(i, sid);
-    }
-    const owner = (i: number): number => {
-        const s = stretch.get(i);
-        if (s === undefined) return -1;
-        let best = -1;
-        placed.forEach((v, j) => {
-            if (s === stretch.get(v.node) &&
-                (best < 0 || Math.abs(v.node - i) < Math.abs(placed[best].node - i))) best = j;
-        });
-        return best;
+    const placed: Placed[] = [];
+    const place = (x: number) => {                       // one valve per mesh node; x to one decimal
+        const node = nodeAt(x);
+        if (!placed.some(v => v.node === node)) placed.push({ x: round1(x), node, k: 0, nonSlam: false });
     };
 
-    // Grow: raise the size of every valve that owns a low node, one step at a time, until no owned
-    // node is low or the owners are all at the largest size. Then shrink: each valve one step down
-    // while that adds no low node (smallest size per valve). Order: all valves together (interaction).
+    // Sites in the ruled order (ANSWERS 2026-10-21 "Q16 placement"): (a) right after the pump check
+    // valve (node 0); (b) slope-break peaks of the pipe table (slope before > slope after), highest
+    // first, each more than VALVE_SPACING_M from the sites before it; (c) right before the line-end
+    // valve, unless a site is closer than VALVE_SPACING_M. A site gets a valve only where stage 1 is
+    // below −1 m there (Q14 Do (3)).
+    const pts = [{ x: 0, z: stage1.nodes[0].elevation }];
+    for (const p of inputs.pipes) pts.push({ x: pts[pts.length - 1].x + p.length, z: p.endElevation });
+    const L = pts[pts.length - 1].x;
+    const slope = (a: { x: number; z: number }, b: { x: number; z: number }) => (b.z - a.z) / (b.x - a.x);
+    const peaks = pts.filter((p, j) => j > 0 && j < pts.length - 1 && slope(pts[j - 1], p) > slope(p, pts[j + 1]));
+    const sites: number[] = [];
+    if (scenario !== 'gravity-valve') sites.push(0);
+    for (const p of peaks.sort((a, b) => b.z - a.z)) {
+        if (sites.every(s => Math.abs(s - p.x) > VALVE_SPACING_M)) sites.push(p.x);
+    }
+    if (scenario !== 'pump-trip' && sites.every(s => Math.abs(s - L) >= VALVE_SPACING_M)) sites.push(L);
+    for (const x of sites) if (minGauge(stage1, nodeAt(x)) < MIN_GAUGE_HEAD_M) place(x);
+
+    // Size (ruling (2)): grow every valve whose own node is below −1 m one step, all together, until
+    // none is (or those are at the largest size). Then each valve that meets −1 m goes one step down
+    // while no valve node that met −1 m drops below it (smallest size per valve).
     const fit = (): SimulationResults => {
         let r = run(placed);
         for (;;) {
-            const grow = new Set<number>();
-            for (const i of lowNodes(r)) { const j = owner(i); if (j >= 0 && placed[j].k < last) grow.add(j); }
-            if (!grow.size) break;
-            for (const j of grow) placed[j].k++;
+            const grow = valveMisses(r, placed).filter(v => v.k < last);
+            if (!grow.length) break;
+            for (const v of grow) v.k++;
             r = run(placed);
         }
-        let was = new Set(lowNodes(r));
         for (let changed = true; changed;) {
             changed = false;
             for (const v of placed) {
-                if (v.k === 0) continue;
+                const was = valveMisses(r, placed);
+                if (v.k === 0 || was.includes(v)) continue;
                 v.k--;
-                const r2 = run(placed), low2 = lowNodes(r2);
-                if (low2.every(i => was.has(i))) { r = r2; was = new Set(low2); changed = true; } else v.k++;
+                const r2 = run(placed);
+                if (valveMisses(r2, placed).every(w => was.includes(w))) { r = r2; changed = true; } else v.k++;
             }
         }
         return r;
     };
 
-    // A valve acts at one grid node. A grid neighbour of a site (same stage-1 low stretch) that the
-    // site's valve cannot keep at −1 m even at the largest size (the 2·dx oscillation next to the
-    // pocket) gets its own valve at the worst such node, and all are sized again. Other points
-    // still below −1 m are reported (row (4)).
-    const sites = placed.map(v => v.node);
+    // Ruling (4): while a node at least VALVE_SPACING_M from every valve is at −8 m or lower, add a
+    // valve at the lowest such node and size all again. Points with no free place are reported.
     let stage2 = fit();
     for (;;) {
-        const left = lowNodes(stage2).filter(i => owner(i) >= 0 && !placed.some(v => v.node === i) &&
-                                                  sites.some(n => Math.abs(n - i) === 1));
-        if (!left.length) break;
-        const p = (i: number) => minGauge(stage2, i);
-        placed.push({ node: left.reduce((a, b) => (p(b) < p(a) ? b : a)), k: 0, nonSlam: false });
+        const free = stage2.nodes.map((_, i) => i).filter(i => placed.every(v => Math.abs(xOf(i) - v.x) >= VALVE_SPACING_M));
+        const deep = free.filter(i => minGauge(stage2, i) <= ADD_VALVE_HEAD_M);
+        if (!deep.length) break;
+        place(xOf(deep.reduce((a, b) => (minGauge(stage2, b) < minGauge(stage2, a) ? b : a))));
         stage2 = fit();
     }
     const half = stage1.nodes.length > 1 ? (stage1.nodes[1].x - stage1.nodes[0].x) / 2 : 0;
     for (const v of placed) {
-        const D = diameterAt(inputs.pipes, xOf(v.node), half);
+        const D = diameterAt(inputs.pipes, v.x, half);
         v.nonSlam = pocketMax(stage2, v.node) > Math.PI * D * D;
     }
-    return { stage1, stage2, valves: toValves(placed), unresolved: lowNodes(stage2).map(xOf) };
+    return { stage1, stage2, valves: toValves(placed), unresolved: misses(stage2, new Set(placed.map(v => v.node))).map(xOf) };
 }

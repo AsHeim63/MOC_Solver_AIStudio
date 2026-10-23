@@ -1053,14 +1053,15 @@ export function CALC_AIR_VALVE_N(
     Z:      number,
     dt:     number,
     A_in:   number,
-    A_out:  number
+    A_out:  number,
+    Q_feed = 0.0   // Q16: known liquid inflow into the node [m³/s] (running pump at the line start)
 ): JunctionResultN {
     let sum_inv_B = 0.0, sum_C_over_B = 0.0;
     for (const f of faces) { sum_inv_B += 1.0 / f.B; sum_C_over_B += f.C / f.B; }
     const a_coef   = dt * sum_inv_B;
-    const b_coef   = V_old - dt * sum_C_over_B;
+    const b_coef   = V_old - dt * (sum_C_over_B + Q_feed);
     const vol = (H: number) => a_coef * H + b_coef;   // pocket volume at H
-    const H_liquid = sum_C_over_B / sum_inv_B;
+    const H_liquid = (sum_C_over_B + Q_feed) / sum_inv_B;
     const KC       = AIR_RT / (RHO_W * G);
     const air = (H: number) => Math.max(0, C_air + dt * KC * AIR_MASS_FLOW(H - Z + H_BARO, A_in, A_out));
     const gap = (H: number) => (H - Z + H_BARO) * vol(H) - air(H);
@@ -1127,6 +1128,14 @@ const PUMP_STOP_ALPHA = 0.001;   // α below which the pump is stopped, check va
 function PUMP_ALPHA(pump: PumpParams, t: number): number {
     return t > pump.tripTime
         ? Math.max(0.0, 1.0 - (t - pump.tripTime) / (pump.haltTime - pump.tripTime)) : 1.0;
+}
+
+/** Q16: built-in (pump-trip) curve flow at a known discharge head H [m³/s], check valve: Q ≥ 0.
+ *  Same curve as CALC_BC_PUMP_DGCM's running branch (DOMAIN §5): α²·Hs − k·Q² = H. */
+function PUMP_TRIP_Q_AT(pump: PumpParams, steadyHead: number, alpha: number, H: number): number {
+    const Hs = HS_FACTOR * steadyHead, Qmax = QMAX_FACTOR * pump.initialFlow, k = Hs / (Qmax * Qmax);
+    const hd = alpha * alpha * Hs - H;
+    return hd > 0.0 ? Math.sqrt(hd / k) : 0.0;
 }
 
 // ── 7c: Pump boundary (left end, node 0) ─────────────────────────────────────
@@ -2117,20 +2126,26 @@ function runCore(
 
     const grid: GridParams   = { dt: baseDt };
     const avAt = airValves?.length ? AIR_VALVE_NODES(layout, airValves) : undefined;   // Q14
-    // Q14 ruling 3: a line-end air valve acts only while its end is a dead end (pump stopped / valve
-    // shut — SECTION 7g, DC-5). Its first dead-end step starts with no air in the pocket: the end BC's
-    // C_gas is DGCM memory (DOMAIN §4/§7, kept after collapse), not air that entered.
-    const avEndOn = new Set<number>();
+    // Q14 ruling 3: a line-end air valve acts while its end is a dead end (pump stopped / valve shut
+    // — SECTION 7g, DC-5), and (Q16, ANSWERS 2026-10-22 "opens instantly") at the line start while the
+    // pump-trip pump still runs, once the pump BC puts the node below atmospheric or air is still in
+    // the pocket. There the pump inflow is the pump curve evaluated ONCE at the node's previous-step
+    // head (single pass, as the cavitation branch evaluates it at H_vap — no joint gas-law + pump-curve
+    // solve, DC-5), then fed to the air node as a known inflow. Air carries over only while a pocket is
+    // held (avAir); otherwise the end BC's C_gas is DGCM memory (DOMAIN §4/§7, kept after collapse),
+    // not air that entered.
+    const avAir = new Set<number>();
     const AIR_VALVE_STEP = (n: number, av: { A_in: number; A_out: number }, C_air: number,
-                            faces: JunctionFaceN[]) => {
-        const r = CALC_AIR_VALVE_N(faces, prevState.V_g[n], C_air, prevState.Z[n], grid.dt, av.A_in, av.A_out);
+                            faces: JunctionFaceN[], Q_feed = 0.0) => {
+        const r = CALC_AIR_VALVE_N(faces, prevState.V_g[n], C_air, prevState.Z[n], grid.dt,
+                                   av.A_in, av.A_out, Q_feed);
         newState.H[n] = r.H; newState.V_g[n] = r.V_g; newState.C_gas[n] = r.C_gas;
         return r.Q;
     };
-    const AIR_VALVE_END = (n: number, av: { A_in: number; A_out: number }, face: JunctionFaceN) => {
-        const C_air = avEndOn.has(n) ? prevState.C_gas[n] : 0.0;
-        avEndOn.add(n);
-        return AIR_VALVE_STEP(n, av, C_air, [face])[0];
+    const AIR_VALVE_END = (n: number, av: { A_in: number; A_out: number }, face: JunctionFaceN, Q_feed = 0.0) => {
+        const Q = AIR_VALVE_STEP(n, av, avAir.has(n) ? prevState.C_gas[n] : 0.0, [face], Q_feed)[0];
+        if (newState.V_g[n] > 0) avAir.add(n); else avAir.delete(n);
+        return Q;
     };
     const avCap = avAt && NODE_SEGMENT_VOLUMES(layout);
     // Q14 spill + refill rulings (ANSWERS 2026-10-18): the pocket is one gas body, its whole volume
@@ -2226,6 +2241,14 @@ function runCore(
                     { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false }));
             } else {
                 CALC_BC_PUMP_DGCM(0, coefsPump, prevState, newState, newFlow, grid, pump, pumpHead, t, pipes[0].p);
+                if (av0 !== undefined && pump.curve === undefined &&
+                    (newState.H[0] < prevState.Z[0] || avAir.has(0))) {   // Q16: running pump, air valve
+                    const Q_feed = PUMP_TRIP_Q_AT(pump, pumpHead, PUMP_ALPHA(pump, t), prevState.H[0]);
+                    newFlow.setQin(0, Q_feed);
+                    newFlow.setQout(0, AIR_VALVE_END(0, av0,
+                        { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false },
+                        Q_feed));
+                }
             }
         }
 
@@ -2510,6 +2533,7 @@ const GGA_PIVOT_MIN  = 1e-14;   // LDLᵀ pivot guard → throw
 const HS_FACTOR      = 1.33;    // pump curve Hs = 1.33·steadyHead (DOMAIN §5). The
                                 // production literal in CALC_BC_PUMP_DGCM is the
                                 // gate-locked source convention; named here for 9.6.
+const QMAX_FACTOR    = 2.0;     // pump curve run-out flow Qmax = 2·Q0 (DOMAIN §5)
 
 /**
  * Pump source mode (DESIGN §5.4):

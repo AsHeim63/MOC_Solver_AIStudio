@@ -1368,7 +1368,7 @@ export default function App() {
                     {protectedShown && (
                       <div className="mt-4 text-xs">
                         {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
-                          <p className="text-slate-500">No air valves needed: the minimum pressure stays at or above −1 m.</p>
+                          <p className="text-slate-500">No air valves needed.</p>
                         ) : (
                           <table className="w-full text-left">
                             <thead className="text-slate-400 uppercase text-[10px]">
@@ -1387,7 +1387,7 @@ export default function App() {
                           </table>
                         )}
                         {avStudy.unresolved.length > 0 && (
-                          <p className="mt-2 text-amber-700">Still below −1 m with these valves (not fixed, reported) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
+                          <p className="mt-2 text-amber-700">Target not met (valve −1 m, line −8 m) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
                         )}
                       </div>
                     )}
