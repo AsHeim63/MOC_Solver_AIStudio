@@ -110,7 +110,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
             <MaxMin r={avStudy.stage2} />
             <Envelope r={avStudy.stage2} scenario={scenario} domain={domain} airValves={avStudy.valves} />
             <h3 className="font-bold mt-2 mb-1">Parts list</h3>
-            {avStudy.valves.length === 0 ? (
+            {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
               <p>No air valves needed.</p>
             ) : (
               <table className="w-full text-left">
@@ -142,7 +142,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
           <H2>Notes</H2>
           <ul className="list-disc pl-5 space-y-0.5">
             <li>Method of Characteristics (MOC) transient solver; heads are piezometric (m), pressures gauge.</li>
-            <li>Line and scenario data are the inputs as entered on screen when this report was opened.</li>
+            <li>Line and scenario data are the inputs of the run shown (the report is offered only while the inputs on screen still match that run).</li>
             <li>Both envelope charts use the Unprotected System head scale.</li>
             {avStudy && <li>Air-valve targets: {MIN_GAUGE_HEAD_M} m at a valve, {ADD_VALVE_HEAD_M} m on the line (gauge).</li>}
             {avStudy && avStudy.unresolved.length > 0 &&

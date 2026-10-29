@@ -195,6 +195,8 @@ export default function App() {
   // Q21: QPRV sizing study (valve-closure scenarios); null until "Size QPRV".
   const [qpStudy, setQpStudy] = useState<QprvStudy | null>(null);
   const [showReport, setShowReport] = useState(false);   // Q24: engineering report page
+  // Q24: the inputs of the run on screen; the report is offered only while the inputs still match them.
+  const [reportKey, setReportKey] = useState<string | null>(null);
   // Q15: device package approved in the user preferences (air valves = the only device type now).
   // Not approved -> no protected results are shown.
   const [avApproved, setAvApproved] = useState<boolean>(() => {
@@ -514,6 +516,9 @@ export default function App() {
     };
   };
 
+  // Q24: every input that feeds the run (or the report's line/scenario data), as one comparable string.
+  const runKey = () => JSON.stringify([scenario, buildDispatchInputs(), suctionText, curveRows]);
+
   const handleRunSimulation = () => {
     setIsSimulating(true);
     setIsAnimating(false);
@@ -544,6 +549,7 @@ export default function App() {
         const res = dispatchSimulation(scenario, inputs);
 
         setResults(res);
+        setReportKey(runKey());
         setAvStudy(null);
         setQpStudy(null);
         setSimError(null);
@@ -563,6 +569,8 @@ export default function App() {
     setIsAnimating(false);
     setTimeout(() => {
       try {
+        const k = runKey();
+        setReportKey(r => r === k ? r : null);   // Q24: sized on other inputs than the run -> no report
         const study = sizeAirValves(scenario, buildDispatchInputs());
         setAvStudy(study);
         setResults(study.stage2);
@@ -581,6 +589,8 @@ export default function App() {
     setIsSimulating(true);
     setTimeout(() => {
       try {
+        const k = runKey();
+        setReportKey(r => r === k ? r : null);   // Q24: as the air valves
         setQpStudy(sizeQprv(scenario, buildDispatchInputs()));
         setSimError(null);
       } catch (error) {
@@ -804,7 +814,10 @@ export default function App() {
   if (showReport && results) {
     const data: [string, string][] = scenario === 'gravity-valve'
       ? [['Pressure at X = 0', `${inletPressure} m`]]
-      : [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`]];
+      : [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`],
+         ['Pump curve', scenario === 'pump-valve'
+           ? curveRows.map(r => `${r.Q} m³/s / ${r.H} m`).join('; ')
+           : 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
       : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
@@ -1355,7 +1368,9 @@ export default function App() {
                     <h2 className="text-xl font-black text-slate-900 mr-auto">{protectedShown ? 'Protected System' : 'Unprotected System'}</h2>
                     {/* Q24: large screen only */}
                     <button onClick={() => { setIsAnimating(false); setShowReport(true); }}
-                      className="hidden lg:inline-flex px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">
+                      disabled={reportKey !== runKey()}
+                      title={reportKey !== runKey() ? 'Inputs changed since the last run: run the analysis again to print.' : undefined}
+                      className="hidden lg:inline-flex px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
                       Print / Save as PDF
                     </button>
                   </div>
