@@ -2216,9 +2216,6 @@ function runCore(
                                 Number.isFinite(qprv.closingTime) && qprv.closingTime > 0)) {
         throw new Error(`QPRV: Cq (${qprv.Cq}) and closing time (${qprv.closingTime} s) must be finite and > 0.`);
     }
-    if (qprv?.runTime !== undefined && !(Number.isFinite(qprv.runTime) && qprv.runTime > 0)) {
-        throw new Error(`QPRV: run time (${qprv.runTime} s) must be finite and > 0.`);
-    }
     const qp = qprv !== undefined && valve !== undefined ? {
         H_open:QPRV_THRESHOLD_M + (upstreamReservoir !== undefined ? upstreamReservoir.head
                 : pump.curve !== undefined ? pump.curve.H_suct + pump.curve.c
@@ -2226,12 +2223,21 @@ function runCore(
         ...qprv
     } : undefined;
     let qpOpen = 0.0;
-    const qpTele = qp && { H_open: qp.H_open, opening: [qpOpen] };   // Q21 telemetry, one opening per fullHistory entry
+    // Q21 telemetry: opening[i] = the opening at fullHistory[i].time (both seeded at t = 0 and pushed
+    // once per step, so equal lengths; measured, findings/q21/align_Q21.ts).
+    const qpTele = qp && { H_open: qp.H_open, opening: [qpOpen] };
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
     // Q21: the QPRV sizing study runs longer (only the loop bound changes, so the first 40·L/a are
-    // the default run bit-for-bit); absent = 40·L/a.
+    // the default run bit-for-bit); absent = 40·L/a. Refused: shorter than 40·L/a (the study only
+    // extends the default run), or not before the pump's trip placeholder (valve scenarios: 1e9 s or
+    // Infinity, "trip never"), which a longer run would turn into a phantom trip.
+    if (qp?.runTime !== undefined &&
+        !(Number.isFinite(qp.runTime) && qp.runTime >= 40.0 * travelTime && qp.runTime < pump.tripTime)) {
+        throw new Error(`QPRV: run time (${qp.runTime} s) must be finite, ≥ 40·L/a (${40.0 * travelTime} s) ` +
+                        `and < the pump trip time (${pump.tripTime} s).`);
+    }
     const maxTime           = qp?.runTime ?? 40.0 * travelTime;
     const maxSteps          = Math.ceil(maxTime / baseDt);
     const steadyPressureHead = pumpHead - pump.elevation;

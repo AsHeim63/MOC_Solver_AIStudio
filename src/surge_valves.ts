@@ -38,6 +38,11 @@ const COARSE_STEPS           = 6;      // first pass: fastest, maximal and 5 tim
 // Amplitude window after closure, in wave periods 4L/a, the same for every candidate of a study
 // (builder reading, LOOK-AT Q21): one period holds a full swing; two leave margin for its phase.
 const AMP_WINDOW_PERIODS     = 2;
+// Full-scan margin (builder's, 2 x the largest halving miss measured): a size whose search best,
+// less this, is still worse than the leader is not scanned in full.
+const SCAN_REL               = 0.2;    // of the size's search-best amplitude
+const SCAN_ABS_M             = 0.04;   // [m], 2 amplitude steps
+const SIZES = Object.keys(SURGE_VALVE_TABLE).map(Number).sort((a, b) => a - b);
 
 /** Largest of xs (a loop: a spread over a long history can overflow the call stack). */
 function maxOf(xs: Iterable<number>): number {
@@ -107,7 +112,7 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
     const { stage1, tried, trial, run } = qprvTrials(scenario, inputs);
     // Per size: whole seconds; a coarse pass over [fastest, maximal], then halve the step around the
     // best time until 1 s (both 1 s neighbours of the size's best are run).
-    for (const size of Object.keys(SURGE_VALVE_TABLE).map(Number).sort((a, b) => a - b)) {
+    for (const size of SIZES) {
         const [lo, hi] = SURGE_VALVE_TABLE[size];
         const clamp = (t: number) => Math.min(hi, Math.max(lo, Math.round(t)));
         let best = trial(size, lo);
@@ -125,12 +130,29 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
         }
     }
 
-    // The best size: every whole second of it (the halving can stop early where equal amplitude steps
-    // alternate with the next step up, so it is checked by a full scan; a few hundred runs at most).
-    const best = () => tried.reduce((b, t) => (qprvOrder(t, b) < 0 ? t : b));
-    const bestSize = best().size_mm, [lo, hi] = SURGE_VALVE_TABLE[bestSize];
-    for (let c = lo; c <= hi; c++) trial(bestSize, c);
-    const chosen = best();
+    // Every whole second of each size that could still tie or beat the leader (the halving misses dips:
+    // measured up to 0.66 m / 9.9 % of a size's amplitude, findings/q21/fullscan_Q21.ts). A size's
+    // optimistic candidate = its search best's `returns`, amplitude less SCAN_REL and SCAN_ABS_M, its
+    // fastest time; it is scanned unless the leader is strictly better. Repeat until none is left (the
+    // leader only improves, so this ends). All sizes scanned = 200-330 s per study, over the limit.
+    const best = (ts: QprvTrial[]) => ts.reduce((b, t) => (qprvOrder(t, b) < 0 ? t : b));
+    const scanned = new Set<number>();
+    for (;;) {
+        const lead = best(tried);
+        const next = SIZES.filter(size => {
+            if (scanned.has(size)) return false;
+            const b = best(tried.filter(t => t.size_mm === size));
+            const amplitude = Math.max(0, b.amplitude * (1 - SCAN_REL) - SCAN_ABS_M);
+            return qprvOrder(lead, { ...b, amplitude, closingTime: SURGE_VALVE_TABLE[size][0] }) >= 0;
+        });
+        if (next.length === 0) break;
+        for (const size of next) {
+            const [lo, hi] = SURGE_VALVE_TABLE[size];
+            for (let c = lo; c <= hi; c++) trial(size, c);
+            scanned.add(size);
+        }
+    }
+    const chosen = best(tried);
     const stage2 = run(chosen.size_mm, chosen.closingTime, chosen.Kv);   // default length
     return { stage1, stage2, qprv: { size_mm: chosen.size_mm, Kv: chosen.Kv, closingTime: chosen.closingTime },
              maxHead: chosen.maxHead, tried };
