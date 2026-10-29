@@ -58,6 +58,9 @@ export const qprvOrder = (a: QprvTrial, b: QprvTrial): number =>
     Number(b.returns) - Number(a.returns) || a.amplitude - b.amplitude ||
     a.closingTime - b.closingTime || a.size_mm - b.size_mm;
 
+/** The best of ts in the row's order (the earliest wins a full tie). */
+const bestOf = (ts: QprvTrial[]): QprvTrial => ts.reduce((b, t) => (qprvOrder(t, b) < 0 ? t : b));
+
 /**
  * Judges one study run (a candidate run longer than the default, solver QPRV telemetry; the QPRV is at
  * the valve node, the last). `nDefault` = entries of the default-length run (its steps are the first
@@ -115,11 +118,8 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
     for (const size of SIZES) {
         const [lo, hi] = SURGE_VALVE_TABLE[size];
         const clamp = (t: number) => Math.min(hi, Math.max(lo, Math.round(t)));
-        let best = trial(size, lo);
-        for (let k = 1; k <= COARSE_STEPS; k++) {
-            const t = trial(size, clamp(lo + (k * (hi - lo)) / COARSE_STEPS));
-            if (qprvOrder(t, best) < 0) best = t;
-        }
+        let best = bestOf(Array.from({ length: COARSE_STEPS + 1 },
+                                     (_, k) => trial(size, clamp(lo + (k * (hi - lo)) / COARSE_STEPS))));
         for (let step = Math.ceil((hi - lo) / COARSE_STEPS / 2); step >= 1; step = step === 1 ? 0 : Math.ceil(step / 2)) {
             for (let moved = true; moved;) {
                 moved = false;
@@ -135,13 +135,12 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
     // optimistic candidate = its search best's `returns`, amplitude less SCAN_REL and SCAN_ABS_M, its
     // fastest time; it is scanned unless the leader is strictly better. Repeat until none is left (the
     // leader only improves, so this ends). All sizes scanned = 200-330 s per study, over the limit.
-    const best = (ts: QprvTrial[]) => ts.reduce((b, t) => (qprvOrder(t, b) < 0 ? t : b));
     const scanned = new Set<number>();
     for (;;) {
-        const lead = best(tried);
+        const lead = bestOf(tried);
         const next = SIZES.filter(size => {
             if (scanned.has(size)) return false;
-            const b = best(tried.filter(t => t.size_mm === size));
+            const b = bestOf(tried.filter(t => t.size_mm === size));
             const amplitude = Math.max(0, b.amplitude * (1 - SCAN_REL) - SCAN_ABS_M);
             return qprvOrder(lead, { ...b, amplitude, closingTime: SURGE_VALVE_TABLE[size][0] }) >= 0;
         });
@@ -152,7 +151,7 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
             scanned.add(size);
         }
     }
-    const chosen = best(tried);
+    const chosen = bestOf(tried);
     const stage2 = run(chosen.size_mm, chosen.closingTime, chosen.Kv);   // default length
     return { stage1, stage2, qprv: { size_mm: chosen.size_mm, Kv: chosen.Kv, closingTime: chosen.closingTime },
              maxHead: chosen.maxHead, tried };
