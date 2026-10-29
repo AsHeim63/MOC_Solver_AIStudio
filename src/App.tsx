@@ -518,6 +518,8 @@ export default function App() {
 
   // Q24: every input that feeds the run (or the report's line/scenario data), as one comparable string.
   const runKey = () => JSON.stringify([scenario, buildDispatchInputs(), suctionText, curveRows]);
+  // Q24: sizing on other inputs than the run -> no report.
+  const dropReportIfInputsChanged = () => { const k = runKey(); setReportKey(r => r === k ? r : null); };
 
   const handleRunSimulation = () => {
     setIsSimulating(true);
@@ -569,8 +571,7 @@ export default function App() {
     setIsAnimating(false);
     setTimeout(() => {
       try {
-        const k = runKey();
-        setReportKey(r => r === k ? r : null);   // Q24: sized on other inputs than the run -> no report
+        dropReportIfInputsChanged();
         const study = sizeAirValves(scenario, buildDispatchInputs());
         setAvStudy(study);
         setResults(study.stage2);
@@ -589,8 +590,7 @@ export default function App() {
     setIsSimulating(true);
     setTimeout(() => {
       try {
-        const k = runKey();
-        setReportKey(r => r === k ? r : null);   // Q24: as the air valves
+        dropReportIfInputsChanged();
         setQpStudy(sizeQprv(scenario, buildDispatchInputs()));
         setSimError(null);
       } catch (error) {
