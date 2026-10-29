@@ -2096,7 +2096,8 @@ function runCore(
     inputPipes?: PipeSection[],
     valve?: ValveParams,
     upstreamReservoir?: { head: number },  // S57 node-0 gravity dispatch (SECTION 7f; spec §1.4)
-    airValves?: AirValveBC[]               // Q14: air valve nodes (SECTION 7g); absent/[] = none
+    airValves?: AirValveBC[],              // Q14: air valve nodes (SECTION 7g); absent/[] = none
+    qprv?: QprvBC                          // Q19: QPRV at the end valve (SECTION 7h); absent = none
 ): SimulationResults {
 
     // `rawPipeParams` is returned by INIT_RUN_STATE (the gate reads it) but is not destructured here:
@@ -2203,6 +2204,23 @@ function runCore(
         pipeIdx: layout.reservoirIncidentPipe[ri],
         head:    steadyInit === 'legacy' ? reservoir.head : resNetNodes[ri].head!
     }));
+
+    // Q19 QPRV (SECTION 7h), valve scenarios only, at the valve node. Reference head = head upstream
+    // of the closed valve with no surge (ruling 2026-10-28): the supply reservoir level, or the pump
+    // head at Q = 0 — H_suct + c on a user curve (SECTION 7c.1, α = 1), else the built-in Hs. Its
+    // opening `qpOpen` is set each step by CALC_BC_QPRV. Shut = SECTION 7e unchanged.
+    if (qprv !== undefined && !(Number.isFinite(qprv.Cq) && qprv.Cq > 0 &&
+                                Number.isFinite(qprv.closingTime) && qprv.closingTime > 0)) {
+        throw new Error(`QPRV: Cq (${qprv.Cq}) and closing time (${qprv.closingTime} s) must be finite and > 0.`);
+    }
+    const qp = qprv !== undefined && valve !== undefined ? {
+        node:   reservoirBCs[0].node,
+        H_open: QPRV_THRESHOLD_M + (upstreamReservoir !== undefined ? upstreamReservoir.head
+                : pump.curve !== undefined ? pump.curve.H_suct + pump.curve.c
+                : PUMP_TRIP_CURVE(pump, pumpHead).Hs),
+        ...qprv
+    } : undefined;
+    let qpOpen = 0.0;
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
@@ -2336,7 +2354,15 @@ function runCore(
                 pipeMIAB, bc.pipeIdx, -1, pe.p.N, -1, layout.nodeIds
             );
             const avE = valve !== undefined ? avAt?.get(bc.node) : undefined;
-            if (valve !== undefined && avE !== undefined && valve.Cv0 * evalTau(valve.law, t) <= 0.0) {
+            let qpDone = false;   // Q19: the QPRV discharged and wrote the node (SECTION 7h)
+            if (valve !== undefined && qp !== undefined) {
+                if (avAir.has(bc.node)) qpOpen = Math.max(0.0, qpOpen - grid.dt / qp.closingTime);   // air pocket: below atmospheric
+                else ({ s: qpOpen, done: qpDone } =
+                          CALC_BC_QPRV(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, qp, qpOpen));
+            }
+            if (qpDone) {
+                // Q19: SECTION 7h wrote H, Q_in, V_g, C_gas of the valve node
+            } else if (valve !== undefined && avE !== undefined && valve.Cv0 * evalTau(valve.law, t) <= 0.0) {
                 // Q14: valve shut (CALC_BC_VALVE's Cv ≤ 0 dead end); throat Q_out = 0, step-local as there
                 newFlow.setQin(bc.node, AIR_VALVE_END(bc.node, avE,
                     { C: coefsRes.Cp, B: coefsRes.B1, dxA: pe.p.dx * pe.p.A, incoming: true }));
@@ -3001,6 +3027,84 @@ function CALC_BC_VALVE(
     newState.C_gas[idx] = C_gas_new;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 7h — CALC_BC_QPRV (quick-acting pressure relief valve at the end valve — Q19)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Q19 QPRV, solver-facing (the input layer converts size / Kv, as the valve's Kv0 → Cv0). */
+export interface QprvBC {
+    Cq:          number;   // fully open: Q = Cq·√(H − Z) [m^2.5/s]; O1 reading Q[m³/h] = Kv·√(P/10)
+    closingTime: number;   // full stroke, open → shut [s]
+}
+const QPRV_OPEN_S        = 1.0;    // full stroke, shut → open [s] ("opens within 1 s", ruling 2026-10-28)
+const QPRV_THRESHOLD_M   = 7.0;    // opens above reference + 7 m, closes below it (ruling 2026-10-28)
+const QPRV_BISECT_ITERS  = 80;     // numerics: 80 halvings of a ≤ 1e4 m bracket, far below 1e-9 m
+
+/**
+ * BOX: CALC_BC_QPRV — the end-valve node (SECTION 7e) with a QPRV discharging there (Q19).
+ *
+ * Ruling 2026-10-28 (builder/inputs/Q19_surge_valves.md): right upstream of the line-end valve.
+ * Placed AT the valve node (O2, the 10 m piece, pending). It discharges to atmosphere at the node
+ * elevation, Q_r = s·Cq·√max(H − Z, 0), s ∈ [0,1] its opening. One C+ face feeds the valve throat
+ * and the QPRV, both liquid orifices:
+ *   (Cp − H)/B1 = Qv(H) + Q_r(H),   Qv = Cv·τ·√(H − H_down), signed, check valve, as SECTION 7e
+ *
+ * Opening (builder reading, LOOK-AT Q19): s opens while the head this step would be above the
+ * threshold H_open = reference + 7 m, and closes while it would be below — at most a full stroke in
+ * QPRV_OPEN_S opening, in the closing time closing. The opening s* that holds H = H_open this step
+ * is closed form (the equation above at H = H_open); s = s* clipped to those rate limits and [0,1].
+ * A previous-step relay instead jumps s by dt/QPRV_OPEN_S per step, i.e. B1·ΔQ metres per step, and
+ * chatters at a mesh-dependent amplitude.
+ *
+ * Then H: the right side rises with H, the left falls — one root, by bisection (no Newton, DOMAIN
+ * §5/§8). Writes nothing (done = false) when s = 0 or the root is at or below Z: there Q_r = 0, the
+ * root is the valve's own, and the caller runs SECTION 7e unchanged (dead end, vapour, air valve).
+ * Above Z the node is liquid (H > Z > H_vap): V_g = 1e-12 seed, C_gas preserved — SECTION 7e's liquid
+ * branch (DOMAIN §7, Bug #3).
+ */
+function CALC_BC_QPRV(
+    idx:       number,
+    coefs:     CharCoefs,
+    prevState: SystemState,
+    newState:  SystemState,
+    newFlow:   FlowState,
+    grid:      GridParams,
+    valve:     ValveParams,
+    t:         number,
+    qp:        QprvBC & { H_open: number },
+    s_old:     number            // opening at the previous step
+): { s: number; done: boolean } {
+    const { Cp, B1 } = coefs;
+    const Z  = prevState.Z[idx];
+    const Cv = valve.Cv0 * evalTau(valve.law, t);
+    const Qv = (H: number): number => {
+        if (Cv <= 0.0) return 0.0;
+        const d = H - valve.H_down;
+        if (d >= 0.0) return Cv * Math.sqrt(d);
+        return valve.check_valve ? 0.0 : -Cv * Math.sqrt(-d);
+    };
+    const Q_need = (Cp - qp.H_open) / B1 - Qv(qp.H_open);     // QPRV flow that holds H = H_open
+    const s_hold = Q_need <= 0.0 ? 0.0
+        : qp.H_open > Z ? Q_need / (qp.Cq * Math.sqrt(qp.H_open - Z)) : Infinity;
+    const s = Math.max(0.0, Math.min(1.0, s_old + grid.dt / QPRV_OPEN_S,
+                                     Math.max(s_hold, s_old - grid.dt / qp.closingTime)));
+    if (s <= 0.0) return { s, done: false };
+    const Cq_s = s * qp.Cq;
+    const f = (H: number): number => (Cp - H) / B1 - Qv(H) - Cq_s * Math.sqrt(Math.max(H - Z, 0.0));
+    if (!(f(Z) > 0.0)) return { s, done: false };
+    let lo = Z, hi = Math.max(Cp, valve.H_down);   // f(lo) > 0 ≥ f(hi)
+    for (let k = 0; k < QPRV_BISECT_ITERS; k++) {
+        const mid = 0.5 * (lo + hi);
+        if (f(mid) > 0.0) lo = mid; else hi = mid;
+    }
+    const H = 0.5 * (lo + hi);
+    newState.H[idx]     = H;
+    newFlow.setQin(idx, (Cp - H) / B1);            // pipe-side face, signed (S47 ruling 5 form)
+    newState.V_g[idx]   = 1e-12;                   // liquid state: seed reset (SECTION 7e)
+    newState.C_gas[idx] = prevState.C_gas[idx];    // preserved — never zeroed (Bug #3)
+    return { s, done: true };
+}
+
 // ── PREPARE_valve — moved from runWaterHammerSimulationValve (Row 3.11 Unit A, S65) ──
 // PURE MOVE of the entry point's former body, verbatim and in its existing statement order.
 // Carries `ASSERT_VALVE_CV0` and the H_valve_steady derivation, both in their existing positions.
@@ -3043,11 +3147,12 @@ export function runWaterHammerSimulationValve(
     pump:       PumpParams,
     valve:      ValveParams,
     trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    airValves?: AirValveBC[],              // Q14
+    qprv?:      QprvBC                     // Q19
 ): SimulationResults {
     const prep = PREPARE_valve(inputPipes, pump, valve, trace);
     return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes, valve,
-                   undefined, airValves);
+                   undefined, airValves, qprv);
 }
 
 
@@ -3212,11 +3317,12 @@ export function runWaterHammerSimulationGravityValve(
     upstream:   GravityUpstream,
     valve:      ValveParams,
     trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    airValves?: AirValveBC[],              // Q14
+    qprv?:      QprvBC                     // Q19
 ): SimulationResults {
     const prep = PREPARE_gravityValve(inputPipes, upstream, valve, trace);
     return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes, valve,
-                   prep.upstreamReservoir, airValves);
+                   prep.upstreamReservoir, airValves, qprv);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

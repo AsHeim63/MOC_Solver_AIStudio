@@ -32,7 +32,7 @@ import {
     PipeSection, PumpParams, ReservoirParams,
     ValveParams, ClosureLaw, SimulationResults,
     GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
-    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC
+    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC, QprvBC
 } from './solver';
 import { fitPumpCurve, pumpCurveFitFault, PumpCurvePoint } from './pump_curve';
 
@@ -169,6 +169,40 @@ export interface DispatchInputs {
     /** Q14: air valves on the line (transient run only; the steady state ignores them).
      *  Absent or [] = today's run, bit-identical. */
     airValves?: AirValveBC[];
+    /** Q19: QPRV at the end valve, 'gravity-valve' and 'pump-valve' only (transient run only).
+     *  Absent = today's run, bit-identical. */
+    qprv?: QprvInput;
+}
+
+/** Q19 ruling table (builder/inputs/Q19_surge_valves.md): nominal size [mm] →
+ *  [fastest closing s, maximal closing s, default Kv]. */
+export const SURGE_VALVE_TABLE: Readonly<Record<number, readonly [number, number, number]>> = {
+    50: [10, 60, 50], 80: [15, 120, 100], 100: [20, 180, 150], 150: [30, 240, 300], 200: [30, 360, 600],
+    250: [30, 480, 900], 300: [30, 600, 1500], 400: [30, 900, 3000], 500: [60, 900, 4000], 600: [90, 900, 5000],
+    800: [120, 900, 6500], 1000: [180, 900, 8000],
+};
+
+/** O1 reading of the ruling's Kv: Q[m³/h] = Kv·√(P/10), P in m of water ⟹ Q[m³/s] = Kv/(3600·√10)·√P. */
+export const KV_TO_CQ = 3600 * Math.sqrt(10);
+
+/** Q19 QPRV input: size from the table, closing time within that size's [fastest, maximal];
+ *  Kv [m³/h at 1 bar] absent = the table's default for the size. */
+export interface QprvInput { size_mm: number; closingTime: number; Kv?: number }
+
+/** Q19: the solver-facing QPRV; throws on a size not in the table, a closing time outside its
+ *  range, or a Kv that is not finite and > 0. */
+export function toSolverQprv(q: QprvInput): QprvBC {
+    const row = SURGE_VALVE_TABLE[q.size_mm];
+    if (row === undefined) {
+        throw new Error(`QPRV size ${q.size_mm} mm is not in the table (${Object.keys(SURGE_VALVE_TABLE).join(', ')} mm).`);
+    }
+    const [fastest, maximal, KvDefault] = row;
+    if (!(q.closingTime >= fastest && q.closingTime <= maximal)) {
+        throw new Error(`QPRV ${q.size_mm} mm: closing time ${q.closingTime} s must lie in [${fastest}, ${maximal}] s.`);
+    }
+    const Kv = q.Kv ?? KvDefault;
+    if (!(Number.isFinite(Kv) && Kv > 0)) throw new Error(`QPRV ${q.size_mm} mm: Kv ${Kv} must be finite and > 0.`);
+    return { Cq: Kv / KV_TO_CQ, closingTime: q.closingTime };
 }
 
 /** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only
@@ -386,11 +420,13 @@ export function dispatchSimulation(
         }
         case 'pump-valve': {
             trace?.(runWaterHammerSimulationValve.name);
-            return runWaterHammerSimulationValve(a.pipes, a.pump, a.valve, trace, inputs.airValves);
+            return runWaterHammerSimulationValve(a.pipes, a.pump, a.valve, trace, inputs.airValves,
+                inputs.qprv && toSolverQprv(inputs.qprv));   // Q19
         }
         case 'gravity-valve': {
             trace?.(runWaterHammerSimulationGravityValve.name);
-            return runWaterHammerSimulationGravityValve(a.pipes, a.upstream, a.valve, trace, inputs.airValves);
+            return runWaterHammerSimulationGravityValve(a.pipes, a.upstream, a.valve, trace, inputs.airValves,
+                inputs.qprv && toSolverQprv(inputs.qprv));   // Q19
         }
         default: {
             const never: never = a;
