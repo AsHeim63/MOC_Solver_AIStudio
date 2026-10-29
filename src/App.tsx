@@ -802,17 +802,15 @@ export default function App() {
 
   // Q24: the report replaces the app page while open (print shows only the report).
   if (showReport && results) {
-    const pumped = scenario !== 'gravity-valve';
-    const data: [string, string][] = [
-      ...(scenario === 'gravity-valve' ? [['Pressure at X = 0', `${inletPressure} m`] as [string, string]] : []),
-      ...(pumped ? [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`]] as [string, string][] : []),
-      ...(scenario === 'pump-trip'
-        ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]] as [string, string][]
-        : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
-           ['Closure exponent', String(valveExponent)]] as [string, string][]),
+    const data: [string, string][] = scenario === 'gravity-valve'
+      ? [['Pressure at X = 0', `${inletPressure} m`]]
+      : [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`]];
+    data.push(...(scenario === 'pump-trip'
+      ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
+      : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
+         ['Closure exponent', String(valveExponent)]]) as [string, string][],
       [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, `${outletPressure} m`],
-      ['Elevation at X = 0', `${sourceElevation} m`],
-    ];
+      ['Elevation at X = 0', `${sourceElevation} m`]);
     const name = scenario === 'pump-trip' ? 'Pump-Operation — pump trip'
       : `Valve-Operation, Source: ${scenario === 'gravity-valve' ? 'Reservoir' : 'Pump'} — valve closure`;
     return (
