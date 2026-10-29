@@ -53,6 +53,7 @@ import { sizeQprv, QprvStudy, peakAll } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
+import { projectText, parseProject } from './project_file';   // Q25
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -517,9 +518,43 @@ export default function App() {
   };
 
   // Q24: every input that feeds the run (or the report's line/scenario data), as one comparable string.
-  const runKey = () => JSON.stringify([scenario, buildDispatchInputs(), suctionText, curveRows]);
+  // Q25 (Q24 open item): only the scenario's own inputs. Pump-fed valve: flow from the curve, trip
+  // neutralised; gravity: no pump; so the pump record counts on pump trip only (Z[0] always).
+  const runKey = () => {
+    const d = buildDispatchInputs();
+    return JSON.stringify([scenario, { ...d, pump: scenario === 'pump-trip' ? d.pump : { elevation: d.pump.elevation } },
+                           scenario === 'pump-valve' ? [suctionText, curveRows] : null]);
+  };
   // Q24: sizing on other inputs than the run -> no report.
   const dropReportIfInputsChanged = () => { const k = runKey(); setReportKey(r => r === k ? r : null); };
+
+  // ── Q25: project file (Save project / Open project) ──────────────────────────────────────
+  const [projectMsg, setProjectMsg] = useState<string | null>(null);
+  const projectInput = React.useRef<HTMLInputElement>(null);
+  const saveProject = () => {
+    const text = projectText({ operation, valveSource, pipes, pump, sourceElevation, outletPressure, inletPressure,
+      valve: { kv0: valveKv0, t0: valveT0, tClose: valveTClose, exponent: valveExponent, checkValve: valveCheckValve },
+      pumpCurve: curveRows, suctionPressure: suctionText, preferences: { airValves: avApproved } });
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'hydroguard-project.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const openProject = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    const p = parseProject(await file.text());
+    if (!p) { setProjectMsg('Not a project file — nothing changed'); return; }
+    setOperation(p.operation); setValveSource(p.valveSource); setPipes(p.pipes); setPump(p.pump);
+    setSourceElevation(p.sourceElevation); setOutletPressure(p.outletPressure); setInletPressure(p.inletPressure);
+    setValveKv0(p.valve.kv0); setValveT0(p.valve.t0); setValveTClose(p.valve.tClose);
+    setValveExponent(p.valve.exponent); setValveCheckValve(p.valve.checkValve);
+    setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
+    // Results on screen belong to the old inputs.
+    setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setReportKey(null); setSimError(null);
+    setGateReport(null); setGateProfile(null); setGateCrash(null); setView('input'); setProjectMsg(null);
+  };
 
   const handleRunSimulation = () => {
     setIsSimulating(true);
@@ -812,12 +847,13 @@ export default function App() {
 
   // Q24: the report replaces the app page while open (print shows only the report).
   if (showReport && results) {
+    // Q25 (Q24 open item): the scenario's own inputs only.
     const data: [string, string][] = scenario === 'gravity-valve'
       ? [['Pressure at X = 0', `${inletPressure} m`]]
-      : [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`],
-         ['Pump curve', scenario === 'pump-valve'
-           ? curveRows.map(r => `${r.Q} m³/s / ${r.H} m`).join('; ')
-           : 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
+      : scenario === 'pump-valve'
+      ? [['Suction pressure', `${suctionText} m`], ['Pump curve', curveRows.map(r => `${r.Q} m³/s / ${r.H} m`).join('; ')]]
+      : [['Initial flow', `${pump.initialFlow} m³/s`],
+         ['Pump curve', 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
       : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
@@ -868,6 +904,13 @@ export default function App() {
             </button>
             )}
             <div className="w-px h-6 bg-slate-200 mx-2" />
+            {/* Q25: project file */}
+            <button onClick={saveProject}
+              className="text-xs font-bold text-slate-500 hover:text-blue-600 transition-colors uppercase tracking-wider">Save project</button>
+            <button onClick={() => projectInput.current?.click()}
+              className="text-xs font-bold text-slate-500 hover:text-blue-600 transition-colors uppercase tracking-wider">Open project</button>
+            <input ref={projectInput} type="file" accept=".json,application/json" onChange={openProject} className="hidden" />
+            {projectMsg && <span className="text-xs font-bold text-red-600">{projectMsg}</span>}
             <button
               onClick={() => {
                 localStorage.clear();
