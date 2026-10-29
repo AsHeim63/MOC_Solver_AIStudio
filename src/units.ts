@@ -70,5 +70,8 @@ export function unitsOf(c: UnitChoice): Record<Qty, string> {
   };
 }
 
+/** A pressure unit that is a height of water column (m, ft). */
+export const isHeadUnit = (u: string): boolean => u === 'm' || u === 'ft';
+
 /** Display form: 6 significant digits, no trailing zeros. */
 export const show6 = (v: number): string => (Number.isFinite(v) ? String(Number(v.toPrecision(6))) : String(v));

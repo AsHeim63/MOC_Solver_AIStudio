@@ -54,7 +54,7 @@ import { scenarioFromControl, Operation, ValveSource } from './scenario_control'
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
 import { projectText, parseProject } from './project_file';   // Q25
-import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6 } from './units';   // Q26
+import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit } from './units';   // Q26
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -70,9 +70,9 @@ import {
 
 /** Q26: one numeric input box in the chosen unit. `value` is the calc-unit (SI) text; the box shows it converted
  *  (6 significant digits), keeps the typed text while focused, and hands back the typed value converted to SI.
- *  Rendering never writes back, so switching units never moves a stored value. `qty` null = no conversion. */
-function UnitInput({ qty, unit, value, onValue, className, step, min }: {
-  qty: Qty | null; unit: string; value: string; onValue: (si: string) => void; className: string; step?: string; min?: string;
+ *  Rendering never writes back, so switching units never moves a stored value. No `qty` = no conversion. */
+function UnitInput({ qty, unit = '', value, onValue, className, step, min }: {
+  qty?: Qty; unit?: string; value: string; onValue: (si: string) => void; className: string; step?: string; min?: string;
 }) {
   const [text, setText] = useState<string | null>(null);
   const conv = (t: string, f: (v: number) => number | string) =>
@@ -1148,7 +1148,7 @@ export default function App() {
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-bold text-slate-400 uppercase">Friction (f)</label>
-                        <UnitInput qty={null} unit="" step="0.0001"
+                        <UnitInput step="0.0001"
                           value={String(pipe.frictionFactor)}
                           onValue={v => handleUpdatePipe(pipe.id, { frictionFactor: Number(Number(v).toFixed(4)) })}
                           className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-md text-sm outline-none focus:border-blue-500"
@@ -1210,19 +1210,19 @@ export default function App() {
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Start (s)</label>
-                      <UnitInput qty={null} unit="" step="0.1" value={String(valveT0)}
+                      <UnitInput step="0.1" value={String(valveT0)}
                         onValue={v => setValveT0(Number(v))}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Time (s)</label>
-                      <UnitInput qty={null} unit="" step="0.1" value={String(valveTClose)}
+                      <UnitInput step="0.1" value={String(valveTClose)}
                         onValue={v => setValveTClose(Number(v))}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Closure Exponent</label>
-                      <UnitInput qty={null} unit="" step="1" min="1" value={String(valveExponent)}
+                      <UnitInput step="1" min="1" value={String(valveExponent)}
                         onValue={v => setValveExponent(Number(v))}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
                     </div>
@@ -1253,7 +1253,7 @@ export default function App() {
                   const s = v as UnitSystem;
                   setUnitChoice({ system: s, pressure: CHOICES[s].pressure[0], flow: CHOICES[s].flow[0] });
                 }],
-                ['Pressure unit', unitChoice.pressure, CHOICES[unitChoice.system].pressure.map(u => [u, u === 'm' || u === 'ft' ? u + ' (water)' : u]),
+                ['Pressure unit', unitChoice.pressure, CHOICES[unitChoice.system].pressure.map(u => [u, isHeadUnit(u) ? u + ' (water)' : u]),
                   (v: string) => setUnitChoice({ ...unitChoice, pressure: v })],
                 ['Flow unit', unitChoice.flow, CHOICES[unitChoice.system].flow.map(u => [u, u]),
                   (v: string) => setUnitChoice({ ...unitChoice, flow: v })],
@@ -1310,7 +1310,7 @@ export default function App() {
                 />
               </div>
               <p className="text-[10px] text-slate-400 leading-snug">
-                Pressures are gauge ({uu.pressure === 'm' || uu.pressure === 'ft' ? `${uu.pressure} of water column` : uu.pressure}) — 0 discharges to open air. Each
+                Pressures are gauge ({isHeadUnit(uu.pressure) ? `${uu.pressure} of water column` : uu.pressure}) — 0 discharges to open air. Each
                 is the pressure <em>at</em> its point; the height above sea level is taken from
                 the pipe profile automatically and added for you.
               </p>
@@ -1373,7 +1373,7 @@ export default function App() {
                 {scenario === 'pump-trip' && (
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Trip Time (s)</label>
-                  <UnitInput qty={null} unit="" step="0.01"
+                  <UnitInput step="0.01"
                     value={String(pump.tripTime)}
                     onValue={v => setPump({ ...pump, tripTime: Number(v) })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
@@ -1384,7 +1384,7 @@ export default function App() {
               {scenario === 'pump-trip' && (
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Halt Time (s)</label>
-                <UnitInput qty={null} unit="" step="0.01"
+                <UnitInput step="0.01"
                   value={String(pump.haltTime)}
                   onValue={v => setPump({ ...pump, haltTime: Number(v) })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
