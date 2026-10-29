@@ -2353,19 +2353,20 @@ function runCore(
                 pipeMIAB, bc.pipeIdx, -1, pe.p.N, -1, layout.nodeIds
             );
             const avE = valve !== undefined ? avAt?.get(bc.node) : undefined;
+            const valveShut = valve !== undefined && valve.Cv0 * evalTau(valve.law, t) <= 0.0;
             let qpDone = false;   // Q19: the QPRV discharged and wrote the node (SECTION 7h)
             if (valve !== undefined && qp !== undefined) {
                 // Air pocket (below atmospheric), or a vapour cavity at the shut valve: the QPRV closes
                 // at its closing rate and SECTION 7e (air valve / closed dead-end DGCM) keeps the node,
                 // so the cavity collapses through DC-4 mass balance before the QPRV may act.
-                const cavity = valve.Cv0 * evalTau(valve.law, t) <= 0.0 && prevState.V_g[bc.node] > 1e-12;
+                const cavity = valveShut && prevState.V_g[bc.node] > 1e-12;
                 if (avAir.has(bc.node) || cavity) qpOpen = Math.max(0.0, qpOpen - grid.dt / qp.closingTime);
                 else ({ s: qpOpen, done: qpDone } =
                           CALC_BC_QPRV(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, qp, qpOpen));
             }
             if (qpDone) {
                 // Q19: SECTION 7h wrote H, Q_in, V_g, C_gas of the valve node
-            } else if (valve !== undefined && avE !== undefined && valve.Cv0 * evalTau(valve.law, t) <= 0.0) {
+            } else if (avE !== undefined && valveShut) {
                 // Q14: valve shut (CALC_BC_VALVE's Cv ≤ 0 dead end); throat Q_out = 0, step-local as there
                 newFlow.setQin(bc.node, AIR_VALVE_END(bc.node, avE,
                     { C: coefsRes.Cp, B: coefsRes.B1, dxA: pe.p.dx * pe.p.A, incoming: true }));
