@@ -78,10 +78,15 @@ const DEC: Record<string, number> = {
   'm³/h': 1, 'm³/s': 4, 'L/s': 1, gpm: 1, 'ft³/s': 3, barg: 3, kPag: 1, mm: 0, in: 2, 'm/s': 3, 'ft/s': 3, Kv: 1, Cv: 1,
 };
 
+/** Q27: `v` with `dec` fixed decimals, no "-0". */
+const fixed = (v: number, dec: number): string => {
+  const s = v.toFixed(dec);
+  return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
+};
+
 /** Q27: a calc-unit (SI) result as shown in `unit`: fixed decimals (per unit unless given), no "-0". */
 export function fmt(qty: Qty, unit: string, v: number, dec = DEC[unit] ?? 2): string {
-  const s = fromCalc(qty, unit, v).toFixed(dec);
-  return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
+  return fixed(fromCalc(qty, unit, v), dec);
 }
 
 /** Q27: the unit a valve coefficient is defined in (Kv: m³/h at 1 bar; Cv: gpm at 1 psi). */
@@ -99,7 +104,7 @@ export function niceAxis(lo: number, hi: number, maxN = 8): Axis {
       const step = m * 10 ** k, a = Math.floor(lo / step), b = Math.ceil(hi / step);
       if (b - a > maxN) continue;
       const dec = Math.max(0, -k);
-      const tick = (v: number) => { const s = v.toFixed(dec); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s; };
+      const tick = (v: number) => fixed(v, dec);
       const ticks = Array.from({ length: b - a + 1 }, (_, i) => Number(((a + i) * step).toFixed(dec)));
       return { domain: [ticks[0], ticks[ticks.length - 1]], ticks, tick };
     }
