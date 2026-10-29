@@ -33,7 +33,7 @@ export const QPRV_AMP_TIE_M  = 0.01;   // amplitudes within this are a tie [m] (
 const RETURN_TOL_M           = 0.01;   // closing-pressure check tolerance [m] (numerics)
 const COARSE_STEPS           = 6;      // first pass: fastest, maximal and 5 times between, per size
 
-const peakAll = (r: SimulationResults): number => Math.max(...r.nodes.map(n => n.maxHead));
+export const peakAll = (r: SimulationResults): number => Math.max(...r.nodes.map(n => n.maxHead));
 
 /** The row's order, amplitude with the tie tolerance: o strictly better than c. */
 const better = (o: QprvTrial, c: QprvTrial): boolean => {
@@ -75,11 +75,13 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
         return t;
     };
 
-    // Search order: the row's order with the amplitude in QPRV_AMP_TIE_M steps (transitive, so the
-    // pattern search below cannot cycle; the tolerance relation `better` can).
-    const key = (a: QprvTrial, b: QprvTrial) => Number(b.returns) - Number(a.returns) ||
-        Math.round(a.amplitude / QPRV_AMP_TIE_M) - Math.round(b.amplitude / QPRV_AMP_TIE_M) ||
+    // The row's order as a sort comparator, the amplitude seen through `amp`.
+    const order = (amp: (x: number) => number) => (a: QprvTrial, b: QprvTrial) =>
+        Number(b.returns) - Number(a.returns) || amp(a.amplitude) - amp(b.amplitude) ||
         a.closingTime - b.closingTime || a.size_mm - b.size_mm;
+    // Search order: the amplitude in QPRV_AMP_TIE_M steps (transitive, so the pattern search below
+    // cannot cycle; the tolerance relation `better` can).
+    const key = order(x => Math.round(x / QPRV_AMP_TIE_M));
 
     // Per size: whole seconds; a coarse pass over [fastest, maximal], then halve the step around the
     // best time until 1 s (both 1 s neighbours of the size's best are run).
@@ -103,9 +105,7 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
 
     // The choice: a candidate no tried one beats; the order's tie tolerance can, in principle, leave
     // none (a cycle) — then the row's order without the tolerance decides.
-    const strict = (a: QprvTrial, b: QprvTrial) => Number(b.returns) - Number(a.returns) ||
-        a.amplitude - b.amplitude || a.closingTime - b.closingTime || a.size_mm - b.size_mm;
-    const sorted = [...tried].sort(strict);
+    const sorted = [...tried].sort(order(x => x));
     const chosen = sorted.find(c => !tried.some(o => better(o, c))) ?? sorted[0];
     const stage2 = run(chosen.size_mm, chosen.closingTime, chosen.Kv);
     return { stage1, stage2, qprv: { size_mm: chosen.size_mm, Kv: chosen.Kv, closingTime: chosen.closingTime },

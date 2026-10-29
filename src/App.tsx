@@ -49,7 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
-import { sizeQprv, QprvStudy } from './surge_valves';
+import { sizeQprv, QprvStudy, peakAll } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
@@ -1428,7 +1428,7 @@ export default function App() {
                     {qpStudy && (
                       <p className="mt-4 text-xs text-slate-700">
                         Size {qpStudy.qprv.size_mm} mm, Kv {qpStudy.qprv.Kv}, closing time {qpStudy.qprv.closingTime} s,
-                        max head {qpStudy.maxHead.toFixed(2)} m (Unprotected {Math.max(...qpStudy.stage1.nodes.map(n => n.maxHead)).toFixed(2)} m);
+                        max head {qpStudy.maxHead.toFixed(2)} m (Unprotected {peakAll(qpStudy.stage1).toFixed(2)} m);
                         {' '}{qpStudy.tried.length} runs.
                         {!qpStudy.tried.some(t => t.returns) &&
                           <span className="text-amber-700"> No table size holds the head at the closing pressure.</span>}
