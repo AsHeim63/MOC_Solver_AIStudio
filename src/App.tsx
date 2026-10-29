@@ -558,7 +558,7 @@ export default function App() {
     setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
     // Results on screen belong to the old inputs.
     setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setReportKey(null); setSimError(null);
-    setGateReport(null); setGateProfile(null); setGateCrash(null); setView('input'); setProjectMsg(null);
+    setGateReport(null); setGateProfile(null); setGateCrash(null); setView('input');
   };
 
   const handleRunSimulation = () => {

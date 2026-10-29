@@ -25,7 +25,12 @@ export const projectText = (p: ProjectInputs): string =>
 
 const obj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-const nums = (o: Record<string, unknown>, keys: string[]) => keys.every(k => num(o[k]));
+const nums = (o: Record<string, unknown>, keys: readonly string[]) => keys.every(k => num(o[k]));
+const pick = (o: object, keys: readonly string[]) =>
+  Object.fromEntries(keys.map(k => [k, (o as Record<string, unknown>)[k]]));
+
+const PIPE_NUMS = ['length', 'diameter', 'waveSpeed', 'frictionFactor', 'endElevation'] as const;
+const PUMP_NUMS = ['initialHead', 'initialFlow', 'tripTime', 'haltTime', 'elevation'] as const;
 
 const NOT_PROJECT = 'Not a project file — nothing changed';
 
@@ -45,10 +50,10 @@ export function parseProject(text: string): ProjectInputs | string {
     (j.valveSource === 'pump' || j.valveSource === 'reservoir') &&
     Array.isArray(pipes) && pipes.length > 0 &&
     pipes.every(p => obj(p) && typeof p.id === 'string' && p.id.trim() !== '' &&
-                     nums(p, ['length', 'diameter', 'waveSpeed', 'frictionFactor', 'endElevation']) &&
+                     nums(p, PIPE_NUMS) &&
                      (p.length as number) > 0 && (p.diameter as number) > 0 && (p.frictionFactor as number) >= 0) &&
     new Set(pipes.map(p => (p as { id: string }).id)).size === pipes.length &&
-    obj(pump) && nums(pump, ['initialHead', 'initialFlow', 'tripTime', 'haltTime', 'elevation']) &&
+    obj(pump) && nums(pump, PUMP_NUMS) &&
     nums(j, ['sourceElevation', 'outletPressure', 'inletPressure']) &&
     obj(valve) && nums(valve, ['kv0', 't0', 'tClose', 'exponent']) && (valve.kv0 as number) > 0 &&
     typeof valve.checkValve === 'boolean' &&
@@ -60,10 +65,8 @@ export function parseProject(text: string): ProjectInputs | string {
   // Rebuilt from the known fields only: no extra keys from the file reach the app state.
   return {
     operation: p.operation, valveSource: p.valveSource,
-    pipes: p.pipes.map(({ id, length, diameter, waveSpeed, frictionFactor, endElevation }) =>
-      ({ id, length, diameter, waveSpeed, frictionFactor, endElevation })),
-    pump: { initialHead: p.pump.initialHead, initialFlow: p.pump.initialFlow, tripTime: p.pump.tripTime,
-            haltTime: p.pump.haltTime, elevation: p.pump.elevation },
+    pipes: p.pipes.map(q => pick(q, ['id', ...PIPE_NUMS]) as unknown as PipeSection),
+    pump: pick(p.pump, PUMP_NUMS) as unknown as PumpParams,
     sourceElevation: p.sourceElevation, outletPressure: p.outletPressure, inletPressure: p.inletPressure,
     valve: p.valve, pumpCurve: p.pumpCurve, suctionPressure: p.suctionPressure, preferences: p.preferences,
   };
