@@ -187,7 +187,8 @@ export const KV_TO_CQ = 3600 * Math.sqrt(10);
 
 /** Q19 QPRV input: size from the table, closing time within that size's [fastest, maximal];
  *  Kv [m³/h at 1 bar] absent = the table's default for the size. */
-export interface QprvInput { size_mm: number; closingTime: number; Kv?: number }
+export interface QprvInput { size_mm: number; closingTime: number; Kv?: number;
+                             runTime?: number }   // Q21 sizing study only: run length [s]; absent = 40·L/a
 
 /** Q19: the solver-facing QPRV; throws on a size not in the table, a closing time outside its
  *  range, or a Kv that is not finite and > 0. */
@@ -202,7 +203,7 @@ export function toSolverQprv(q: QprvInput): QprvBC {
     }
     const Kv = q.Kv ?? KvDefault;
     if (!(Number.isFinite(Kv) && Kv > 0)) throw new Error(`QPRV ${q.size_mm} mm: Kv ${Kv} must be finite and > 0.`);
-    return { Cq: Kv / KV_TO_CQ, closingTime: q.closingTime };
+    return { Cq: Kv / KV_TO_CQ, closingTime: q.closingTime, ...(q.runTime !== undefined && { runTime: q.runTime }) };
 }
 
 /** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only

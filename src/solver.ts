@@ -93,6 +93,9 @@ export interface SimulationResults {
     // Q14: per node, the largest whole air pocket of the air valve at that node [m³] (0 elsewhere);
     // only with air valves. The pocket is one gas body held at the valve node (spill ruling).
     airPocketMax?: number[];
+    // Q21: only with a QPRV (SECTION 7h). H_open = reference + 7 m [m]; opening = its opening s ∈ [0,1]
+    // per fullHistory entry. Unhashed telemetry, read by the sizing stage (surge_valves.ts).
+    qprv?: { H_open: number; opening: number[] };
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2213,6 +2216,9 @@ function runCore(
                                 Number.isFinite(qprv.closingTime) && qprv.closingTime > 0)) {
         throw new Error(`QPRV: Cq (${qprv.Cq}) and closing time (${qprv.closingTime} s) must be finite and > 0.`);
     }
+    if (qprv?.runTime !== undefined && !(Number.isFinite(qprv.runTime) && qprv.runTime > 0)) {
+        throw new Error(`QPRV: run time (${qprv.runTime} s) must be finite and > 0.`);
+    }
     const qp = qprv !== undefined && valve !== undefined ? {
         H_open:QPRV_THRESHOLD_M + (upstreamReservoir !== undefined ? upstreamReservoir.head
                 : pump.curve !== undefined ? pump.curve.H_suct + pump.curve.c
@@ -2220,10 +2226,13 @@ function runCore(
         ...qprv
     } : undefined;
     let qpOpen = 0.0;
+    const qpOpening = qp !== undefined ? [qpOpen] : undefined;   // Q21 telemetry, one per fullHistory entry
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
-    const maxTime           = 40.0 * travelTime;
+    // Q21: the QPRV sizing study runs longer (only the loop bound changes, so the first 40·L/a are
+    // the default run bit-for-bit); absent = 40·L/a.
+    const maxTime           = qp?.runTime ?? 40.0 * travelTime;
     const maxSteps          = Math.ceil(maxTime / baseDt);
     const steadyPressureHead = pumpHead - pump.elevation;
     const exitThreshold     = 0.1 * steadyPressureHead;
@@ -2406,6 +2415,7 @@ function runCore(
             q_in:   reassembleQin(prevFlow, totalNodes),
             endFlows: captureEndFlows(prevFlow, pipes)
         });
+        qpOpening?.push(qpOpen);
 
         // 7. Early-exit: check if transient has settled
         if (t > pump.haltTime + 4.0 * travelTime) {
@@ -2476,7 +2486,8 @@ function runCore(
         : undefined;
 
     return { timeSteps, nodes, timeHistory, fullHistory, paths,
-             ...(avPocket !== undefined && { airPocketMax: avPocket }) };
+             ...(avPocket !== undefined && { airPocketMax: avPocket }),
+             ...(qp !== undefined && qpOpening !== undefined && { qprv: { H_open: qp.H_open, opening: qpOpening } }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
@@ -3039,6 +3050,7 @@ function CALC_BC_VALVE(
 export interface QprvBC {
     Cq:          number;   // fully open: Q = Cq·√(H − Z) [m^2.5/s]; O1 reading Q[m³/h] = Kv·√(P/10)
     closingTime: number;   // full stroke, open → shut [s]
+    runTime?:    number;   // Q21 sizing study only: run length [s] instead of 40·L/a; absent = today's run
 }
 const QPRV_OPEN_S        = 1.0;    // full stroke, shut → open [s] ("opens within 1 s", ruling 2026-10-28)
 const QPRV_THRESHOLD_M   = 7.0;    // opens above reference + 7 m, closes below it (ruling 2026-10-28)

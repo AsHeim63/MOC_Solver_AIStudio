@@ -49,6 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
+import { sizeQprv, QprvStudy, peakAll } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
@@ -190,6 +191,8 @@ export default function App() {
   const [results, setResults] = useState<SimulationResults | null>(null);
   // Q14: air valve study (stage 1 unprotected, stage 2 protected); null until "Size air valves".
   const [avStudy, setAvStudy] = useState<AirValveStudy | null>(null);
+  // Q21: QPRV sizing study (valve-closure scenarios); null until "Size QPRV".
+  const [qpStudy, setQpStudy] = useState<QprvStudy | null>(null);
   // Q15: device package approved in the user preferences (air valves = the only device type now).
   // Not approved -> no protected results are shown.
   const [avApproved, setAvApproved] = useState<boolean>(() => {
@@ -540,6 +543,7 @@ export default function App() {
 
         setResults(res);
         setAvStudy(null);
+        setQpStudy(null);
         setSimError(null);
         setSelectedNodeIdx(0);
       } catch (error) {
@@ -563,6 +567,22 @@ export default function App() {
         setSimError(null);
       } catch (error) {
         console.error("Air valve sizing failed", error);
+        setSimError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 100);
+  };
+
+  // Q21: QPRV size and closing time searched after the Unprotected run (background, as the air valves).
+  const handleSizeQprv = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      try {
+        setQpStudy(sizeQprv(scenario, buildDispatchInputs()));
+        setSimError(null);
+      } catch (error) {
+        console.error("QPRV sizing failed", error);
         setSimError(error instanceof Error ? error.message : String(error));
       } finally {
         setIsSimulating(false);
@@ -1391,6 +1411,28 @@ export default function App() {
                           <p className="mt-2 text-amber-700">Target not met (valve {MIN_GAUGE_HEAD_M} m, line {ADD_VALVE_HEAD_M} m) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
                         )}
                       </div>
+                    )}
+                  </section>
+                  )}
+
+                  {/* Q21: QPRV sizing (valve-closure scenarios) */}
+                  {scenario !== 'pump-trip' && (
+                  <section data-q21="qprv" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <h3 className="text-lg font-bold mr-auto">QPRV</h3>
+                      <button onClick={handleSizeQprv} disabled={isSimulating}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                        Size QPRV
+                      </button>
+                    </div>
+                    {qpStudy && (
+                      <p className="mt-4 text-xs text-slate-700">
+                        Size {qpStudy.qprv.size_mm} mm, Kv {qpStudy.qprv.Kv}, closing time {qpStudy.qprv.closingTime} s,
+                        max head {qpStudy.maxHead.toFixed(2)} m (Unprotected {peakAll(qpStudy.stage1).toFixed(2)} m);
+                        {' '}{qpStudy.tried.length} runs.
+                        {!qpStudy.tried.some(t => t.returns) &&
+                          <span className="text-amber-700"> No table size holds the head at the closing pressure.</span>}
+                      </p>
                     )}
                   </section>
                   )}
