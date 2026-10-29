@@ -9,7 +9,7 @@ import type { Scenario } from './scenario_dispatch';
 import { AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { QprvStudy } from './surge_valves';
 import { ProfileIcons, profileIcons } from './profile_icons';
-import { Qty, fmt, fmtMm, fromCalc, show6, nodesInLength } from './units';   // Q27: shown in the chosen units
+import { Axis, Qty, fmt, fmtMm, fromCalc, show6, nodesInLength } from './units';   // Q27: shown in the chosen units
 
 type U = Record<Qty, string>;
 
@@ -18,9 +18,9 @@ const CHART_W = 640, CHART_H = 280;   // px; fits the A4 print width (210 mm −
 const maxHead = (r: SimulationResults) => Math.max(...r.nodes.map(n => n.maxHead));
 const minHead = (r: SimulationResults) => Math.min(...r.nodes.map(n => n.minHead));
 
-function Envelope({ r, scenario, domain, airValves = [], u }:
-  { r: SimulationResults; scenario: Scenario; domain: [number, number] | [any, any]; airValves?: { x: number; nonSlam: boolean }[]; u: U }) {
-  // Q27: plotted in the length unit (domain arrives already in it).
+function Envelope({ r, scenario, axis, airValves = [], u }:
+  { r: SimulationResults; scenario: Scenario; axis: Axis | null; airValves?: { x: number; nonSlam: boolean }[]; u: U }) {
+  // Q27: plotted in the length unit (the axis arrives already in it).
   const L = (v: number) => fromCalc('length', u.length, v);
   const nodes = nodesInLength(r.nodes, u.length);
   return (
@@ -29,7 +29,7 @@ function Envelope({ r, scenario, domain, airValves = [], u }:
       <XAxis dataKey="x" tick={{ fontSize: 9 }}
         tickFormatter={(v) => Math.round(v).toString()}
         label={{ value: `Distance (${u.length})`, position: 'insideBottom', offset: -5, fontSize: 10 }} />
-      <YAxis domain={domain} tick={{ fontSize: 9 }} tickFormatter={(v) => Math.round(v).toString()}
+      <YAxis domain={axis?.domain ?? ['auto', 'auto']} ticks={axis?.ticks} tick={{ fontSize: 9 }} tickFormatter={axis ? axis.tick : (v) => Math.round(v).toString()}
         label={{ value: `Head (${u.length})`, angle: -90, position: 'insideLeft', fontSize: 10 }} />
       <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '9px' }} />
       <Line name="Max Head" type="linear" dataKey="maxHead" stroke="#ef4444" strokeWidth={1.5} dot={false} isAnimationActive={false} />
@@ -58,19 +58,19 @@ export interface ReportProps {
   unprotected: SimulationResults;
   avStudy: AirValveStudy | null;
   qpStudy: QprvStudy | null;
-  domain: [number, number] | [any, any];   // the screen's (Unprotected) head-axis scale, in the length unit
+  axis: Axis | null;                     // the screen's (Unprotected) head-axis scale, in the length unit
   u: U;                                    // Q27: the unit of each quantity (units.ts unitsOf)
   onClose: () => void;
 }
 
-export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, domain, u, onClose }: ReportProps) {
+export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, axis, u, onClose }: ReportProps) {
   // The button means "print now": open the browser's print once the page has drawn.
   React.useEffect(() => { const t = setTimeout(() => window.print(), 400); return () => clearTimeout(t); }, []);
   const total = pipes.reduce((s, p) => s + p.length, 0);
   const td = 'py-0.5 pr-3';
   const sh = (qty: Qty, v: number) => show6(fromCalc(qty, u[qty], v));   // line data: 6 significant digits, as the inputs
   const inUnit = (mm: number) => fmtMm(u.diameter, mm);
-  const envProps = { scenario, domain, u };
+  const envProps = { scenario, axis, u };
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans">
       <div className="print:hidden flex justify-end gap-2 max-w-[720px] mx-auto px-4 pt-4">
@@ -96,6 +96,9 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
               </tr>
             ))}
           </tbody>
+          <tfoot>
+            <tr className="border-t border-slate-300 font-semibold"><td className={td}>Total</td><td className={td}>{sh('length', total)}</td></tr>
+          </tfoot>
         </table>
 
         <H2>Scenario</H2>

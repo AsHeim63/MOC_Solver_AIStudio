@@ -54,7 +54,7 @@ import { scenarioFromControl, Operation, ValveSource } from './scenario_control'
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
 import { projectText, parseProject } from './project_file';   // Q25
-import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, fmtMm, nodesInLength } from './units';   // Q26, Q27
+import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, fmtMm, nodesInLength, niceAxis, valveBasis } from './units';   // Q26, Q27
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -63,7 +63,7 @@ import { evaluateGate, GateReport } from './gate_checks';
 import { buildProfileView, summariseProfile, ProfileView } from './gate_view';
 // ── D-5c: Screen 2 reads its chart, tooltip and verdict classes from here — never re-derived ──
 import {
-  buildGateChartData, tooltipFields, summaryMode, fixedNoNegZero,
+  buildGateChartData, tooltipFields, summaryMode,
   runAnalysisState, GateChartPoint, numberCaveats,
   gateMessage, acknowledgeReturnTo, modalAutoDismiss, GATE_PASS_LINE, GATE_FAIL_TITLE, A3_NOTE,
 } from './gate_screen';
@@ -798,9 +798,8 @@ export default function App() {
     const yMax = Math.round(maxHead + 10);
     return [yMin, yMax] as [number, number];
   }, [scaleResults]);
-  // Q27: the same scale in the length unit, widened to whole units so the ticks still span Max / Min Head.
-  const yAxisShown = (typeof yAxisDomain[0] === 'number'
-    ? [Math.floor(L(yAxisDomain[0])), Math.ceil(L(yAxisDomain[1]))] : yAxisDomain) as [any, any];
+  // Q27: the same scale in the length unit, widened to a nice step there so the ticks still span Max / Min Head.
+  const yAxisShown = typeof yAxisDomain[0] === 'number' ? niceAxis(L(yAxisDomain[0]), L(yAxisDomain[1])) : null;
 
  // Selectable nodes: upstream boundary + all pipe-to-pipe junction nodes
   const selectableNodes = useMemo(() => {
@@ -845,17 +844,17 @@ export default function App() {
     }));
   }, [results, selectedNodeIdx, uu.pressure, uu.flow, uu.volume]);
 
-  // Q14: pressure / flow tab axes from stage 1 at the selected node (auto without a study).
+  // Q14: pressure / flow tab axes from stage 1 at the selected node (the shown run without a study).
+  // Q27: nice steps in the shown unit.
   const tabYDomain = useMemo(() => {
-    const auto = ['auto', 'auto'] as [any, any];
-    const r = avStudy?.stage1, z = r?.nodes[selectedNodeIdx]?.elevation;
-    if (!r || z === undefined) return { pressure: auto, flow: auto };
-    const span = (v: number[]) => [Math.floor(Math.min(...v)), Math.ceil(Math.max(...v))] as [number, number];
+    const r = avStudy?.stage1 ?? results, z = r?.nodes[selectedNodeIdx]?.elevation;
+    if (!r || z === undefined || !r.fullHistory.length) return { pressure: undefined, flow: undefined };
+    const span = (v: number[]) => niceAxis(Math.min(...v), Math.max(...v));
     return {
       pressure: span(r.fullHistory.map(f => fromCalc('pressure', uu.pressure, f.heads[selectedNodeIdx] - z))),
       flow: span(r.fullHistory.map(f => fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0))),
     };
-  }, [avStudy, selectedNodeIdx, uu.pressure, uu.flow]);
+  }, [avStudy, results, selectedNodeIdx, uu.pressure, uu.flow]);
 
   // Effective t_max for tab charts given current zoom level
   const effectiveTabTMax = useMemo(() => {
@@ -901,7 +900,7 @@ export default function App() {
          ['Pump curve', 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
-      : [[`Valve ${uu.valve}`, `${fmt('valve', uu.valve, valveKv0)} ${uu.valve === 'Kv' ? 'm³/h' : 'gpm at 1 psi'}`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
+      : [[`Valve ${uu.valve}`, `${fmt('valve', uu.valve, valveKv0)} ${valveBasis(uu.valve)}`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
          ['Closure exponent', String(valveExponent)]]) as [string, string][],
       [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, show('pressure', outletPressure)],
       ['Elevation at X = 0', show('length', sourceElevation)]);
@@ -910,7 +909,7 @@ export default function App() {
     return (
       <Report pipes={pipes} scenario={scenario} scenarioName={name} scenarioData={data}
         unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy}
-        domain={yAxisShown} u={uu} onClose={() => setShowReport(false)} />
+        axis={yAxisShown} u={uu} onClose={() => setShowReport(false)} />
     );
   }
 
@@ -1217,7 +1216,7 @@ export default function App() {
                 <>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{uu.valve === 'Cv' ? 'Valve Cv (gpm at 1 psi)' : 'Valve Kv (m³/h)'}</label>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{`Valve ${uu.valve} (${valveBasis(uu.valve)})`}</label>
                       <UnitInput qty="valve" unit={uu.valve} step="0.1" value={String(valveKv0)}
                         onValue={v => setValveKv0(Number(v))}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
@@ -1655,8 +1654,8 @@ export default function App() {
                             <YAxis 
                               label={{ value: `Head (${uu.length})`, angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
                               tick={{ fontSize: 10 }}
-                              tickFormatter={(val) => Math.round(val).toString()}
-                              domain={yAxisShown}
+                              tickFormatter={yAxisShown ? yAxisShown.tick : (val) => Math.round(val).toString()}
+                              domain={yAxisShown?.domain ?? ['auto', 'auto']} ticks={yAxisShown?.ticks}
                             />
                             <Tooltip
                               contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
@@ -1776,11 +1775,11 @@ export default function App() {
                                   tick={{ fontSize: 10 }}
                                   tickFormatter={(val) => Math.round(val).toString()}
                                 />
-                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Math.round(val).toString()} domain={tabYDomain.pressure} />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={tabYDomain.pressure?.tick} domain={tabYDomain.pressure?.domain ?? ['auto', 'auto']} ticks={tabYDomain.pressure?.ticks} />
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [Number(v).toFixed(2) + ' ' + uu.pressure, 'Pressure']}
+                                  formatter={(v: any) => [fmt('pressure', uu.pressure, toCalc('pressure', uu.pressure, Number(v))) + ' ' + uu.pressure, 'Pressure']}
                                 />
                                 <Line type="linear" dataKey="pressure" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
                               </LineChart>
@@ -1817,7 +1816,7 @@ export default function App() {
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [Number(v).toFixed(2) + ' ' + uu.volume, 'Vapor Volume']}
+                                  formatter={(v: any) => [fmt('volume', uu.volume, toCalc('volume', uu.volume, Number(v))) + ' ' + uu.volume, 'Vapor Volume']}
                                 />
                                 <Area type="linear" dataKey="vaporVolume" stroke="#f97316" fillOpacity={1} fill="url(#colorVapor)" strokeWidth={2} isAnimationActive={false} />
                               </AreaChart>
@@ -1844,11 +1843,11 @@ export default function App() {
                                   tick={{ fontSize: 10 }}
                                   tickFormatter={(val) => Math.round(val).toString()}
                                 />
-                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => val.toFixed(2)} domain={tabYDomain.flow} />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={tabYDomain.flow?.tick} domain={tabYDomain.flow?.domain ?? ['auto', 'auto']} ticks={tabYDomain.flow?.ticks} />
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [Number(v).toFixed(4) + ' ' + uu.flow, 'Flow']}
+                                  formatter={(v: any) => [fmt('flow', uu.flow, toCalc('flow', uu.flow, Number(v))) + ' ' + uu.flow, 'Flow']}
                                 />
                                 <Line type="linear" dataKey="flow" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} />
                               </LineChart>

@@ -84,6 +84,28 @@ export function fmt(qty: Qty, unit: string, v: number, dec = DEC[unit] ?? 2): st
   return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
 }
 
+/** Q27: the unit a valve coefficient is defined in (Kv: m³/h at 1 bar; Cv: gpm at 1 psi). */
+export const valveBasis = (unit: string): string => (unit === 'Cv' ? `${CHOICES.us.flow[0]} at 1 psi` : CHOICES.metric.flow[0]);
+
+/** Q27: a chart axis in the shown unit. */
+export interface Axis { domain: [number, number]; ticks: number[]; tick: (v: number) => string }
+
+/** Q27: [lo, hi] (shown unit) widened to the smallest 1/2/5 x 10^k step that needs at most `maxN` intervals. */
+export function niceAxis(lo: number, hi: number, maxN = 8): Axis {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) { lo = 0; hi = 1; }
+  if (!(hi > lo)) { const d = Math.abs(lo) / 10 || 1; lo -= d; hi += d; }
+  for (let k = Math.floor(Math.log10((hi - lo) / maxN)); ; k++) {
+    for (const m of [1, 2, 5]) {
+      const step = m * 10 ** k, a = Math.floor(lo / step), b = Math.ceil(hi / step);
+      if (b - a > maxN) continue;
+      const dec = Math.max(0, -k);
+      const tick = (v: number) => { const s = v.toFixed(dec); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s; };
+      const ticks = Array.from({ length: b - a + 1 }, (_, i) => Number(((a + i) * step).toFixed(dec)));
+      return { domain: [ticks[0], ticks[ticks.length - 1]], ticks, tick };
+    }
+  }
+}
+
 /** Q27: a valve size given in mm, shown in the diameter unit. */
 export const fmtMm = (unit: string, mm: number): string => fmt('diameter', unit, mm / 1000);
 

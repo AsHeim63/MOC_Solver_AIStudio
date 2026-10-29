@@ -205,7 +205,7 @@ const PROBLEM_LINE: Record<GateCode, string> = {
     B11: 'Suction pressure too low',    // Q10, ruling Q6-i
     // Advisories: the text after "Note: " (SPEC_S63.md §4.2's conditions, in plain words).
     A1: 'Low flow - the accuracy of the results has not been verified at this flow',
-    A2: 'Velocity above 3 m/s',
+    A2: `Velocity above ${A2_VELOCITY_MAX} m/s`,   // Q27: from the gate constant (3 -> "3 m/s")
     A3: 'Pressure line within 2 m of the vapour line',
     A4: 'A pipe segment is shorter than one calculation step',
     A5: 'Valve closes faster than one pressure-wave round trip - surge will be maximal',
