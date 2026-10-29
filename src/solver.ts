@@ -1139,9 +1139,9 @@ function PUMP_ALPHA(pump: PumpParams, t: number): number {
 // ── 7c: Pump boundary (left end, node 0) ─────────────────────────────────────
 /** SECTION 7c: the built-in pump curve α²·Hs − k·Q² = H (DOMAIN §5), Hs = HS_FACTOR·steadyHead,
  *  k = Hs/Qmax², Qmax = QMAX_FACTOR·Q0 — the one place it is defined (CALC_BC_PUMP_DGCM, PUMP_TRIP_Q_AT). */
-function PUMP_TRIP_CURVE(pump: PumpParams, steadyHead: number): { Hs: number; k: number } {
+function PUMP_TRIP_CURVE(pump: PumpParams, steadyHead: number): { Hs: number; k: number; Qmax: number } {
     const Hs = HS_FACTOR * steadyHead, Qmax = QMAX_FACTOR * pump.initialFlow;
-    return { Hs, k: Hs / (Qmax * Qmax) };
+    return { Hs, k: Hs / (Qmax * Qmax), Qmax };
 }
 
 /** SECTION 7c (Q16): built-in curve flow at a known discharge head H [m³/s], check valve: Q ≥ 0.
@@ -2743,7 +2743,7 @@ export function INIT_NETWORK_STEADY_STATE_GGA(
     let inject: number;
     if (source.kind === 'pumpCurve') {
         if (!(HS_FACTOR > 1)) throw new Error('GGA: HS_FACTOR ≤ 1 → imaginary pump root');
-        inject = 2.0 * source.Q0 * Math.sqrt(1.0 - 1.0 / HS_FACTOR);
+        inject = PUMP_TRIP_CURVE({ initialFlow: source.Q0 } as PumpParams, 0).Qmax * Math.sqrt(1.0 - 1.0 / HS_FACTOR);
     } else {
         inject = source.Q;
     }
