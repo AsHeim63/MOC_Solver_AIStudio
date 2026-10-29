@@ -127,9 +127,10 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
 
     // The best size: every whole second of it (the halving can stop early where equal amplitude steps
     // alternate with the next step up, so it is checked by a full scan; a few hundred runs at most).
-    const bestSize = [...tried].sort(qprvOrder)[0].size_mm, [lo, hi] = SURGE_VALVE_TABLE[bestSize];
+    const best = () => tried.reduce((b, t) => (qprvOrder(t, b) < 0 ? t : b));
+    const bestSize = best().size_mm, [lo, hi] = SURGE_VALVE_TABLE[bestSize];
     for (let c = lo; c <= hi; c++) trial(bestSize, c);
-    const chosen = [...tried].sort(qprvOrder)[0];
+    const chosen = best();
     const stage2 = run(chosen.size_mm, chosen.closingTime, chosen.Kv);   // default length
     return { stage1, stage2, qprv: { size_mm: chosen.size_mm, Kv: chosen.Kv, closingTime: chosen.closingTime },
              maxHead: chosen.maxHead, tried };

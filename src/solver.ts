@@ -2226,7 +2226,7 @@ function runCore(
         ...qprv
     } : undefined;
     let qpOpen = 0.0;
-    const qpOpening = qp !== undefined ? [qpOpen] : undefined;   // Q21 telemetry, one per fullHistory entry
+    const qpTele = qp && { H_open: qp.H_open, opening: [qpOpen] };   // Q21 telemetry, one opening per fullHistory entry
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
@@ -2415,7 +2415,7 @@ function runCore(
             q_in:   reassembleQin(prevFlow, totalNodes),
             endFlows: captureEndFlows(prevFlow, pipes)
         });
-        qpOpening?.push(qpOpen);
+        qpTele?.opening.push(qpOpen);
 
         // 7. Early-exit: check if transient has settled
         if (t > pump.haltTime + 4.0 * travelTime) {
@@ -2487,7 +2487,7 @@ function runCore(
 
     return { timeSteps, nodes, timeHistory, fullHistory, paths,
              ...(avPocket !== undefined && { airPocketMax: avPocket }),
-             ...(qp !== undefined && qpOpening !== undefined && { qprv: { H_open: qp.H_open, opening: qpOpening } }) };
+             ...(qpTele !== undefined && { qprv: qpTele }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
