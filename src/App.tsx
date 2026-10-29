@@ -520,6 +520,7 @@ export default function App() {
   // Q24: every input that feeds the run (or the report's line/scenario data), as one comparable string.
   // Q25 (Q24 open item): only the scenario's own inputs. Pump-fed valve: flow from the curve, trip
   // neutralised; gravity: no pump; so the pump record counts on pump trip only (Z[0] always).
+  // Leaving the pump record out on pump-valve relies on the gate refusing an invalid curve (no run, no report).
   const runKey = () => {
     const d = buildDispatchInputs();
     return JSON.stringify([scenario, { ...d, pump: scenario === 'pump-trip' ? d.pump : { elevation: d.pump.elevation } },
@@ -532,6 +533,7 @@ export default function App() {
   const [projectMsg, setProjectMsg] = useState<string | null>(null);
   const projectInput = React.useRef<HTMLInputElement>(null);
   const saveProject = () => {
+    setProjectMsg(null);
     const text = projectText({ operation, valveSource, pipes, pump, sourceElevation, outletPressure, inletPressure,
       valve: { kv0: valveKv0, t0: valveT0, tClose: valveTClose, exponent: valveExponent, checkValve: valveCheckValve },
       pumpCurve: curveRows, suctionPressure: suctionText, preferences: { airValves: avApproved } });
@@ -543,9 +545,12 @@ export default function App() {
   const openProject = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
+    setProjectMsg(null);
     if (!file) return;
-    const p = parseProject(await file.text());
-    if (!p) { setProjectMsg('Not a project file — nothing changed'); return; }
+    let text: string;
+    try { text = await file.text(); } catch { setProjectMsg('Could not read the file — nothing changed'); return; }
+    const p = parseProject(text);
+    if (typeof p === 'string') { setProjectMsg(p); return; }
     setOperation(p.operation); setValveSource(p.valveSource); setPipes(p.pipes); setPump(p.pump);
     setSourceElevation(p.sourceElevation); setOutletPressure(p.outletPressure); setInletPressure(p.inletPressure);
     setValveKv0(p.valve.kv0); setValveT0(p.valve.t0); setValveTClose(p.valve.tClose);
