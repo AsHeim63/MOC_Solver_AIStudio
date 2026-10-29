@@ -93,9 +93,6 @@ export interface SimulationResults {
     // Q14: per node, the largest whole air pocket of the air valve at that node [m³] (0 elsewhere);
     // only with air valves. The pocket is one gas body held at the valve node (spill ruling).
     airPocketMax?: number[];
-    // Q21: only with a QPRV (SECTION 7h). H_open = reference + 7 m [m]; opening = its opening s ∈ [0,1]
-    // per fullHistory entry. Unhashed telemetry, read by the sizing stage (surge_valves.ts).
-    qprv?: { H_open: number; opening: number[] };
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2223,7 +2220,6 @@ function runCore(
         ...qprv
     } : undefined;
     let qpOpen = 0.0;
-    const qpOpening = qp !== undefined ? [qpOpen] : undefined;   // Q21 telemetry, one per fullHistory entry
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
@@ -2410,7 +2406,6 @@ function runCore(
             q_in:   reassembleQin(prevFlow, totalNodes),
             endFlows: captureEndFlows(prevFlow, pipes)
         });
-        qpOpening?.push(qpOpen);
 
         // 7. Early-exit: check if transient has settled
         if (t > pump.haltTime + 4.0 * travelTime) {
@@ -2481,8 +2476,7 @@ function runCore(
         : undefined;
 
     return { timeSteps, nodes, timeHistory, fullHistory, paths,
-             ...(avPocket !== undefined && { airPocketMax: avPocket }),
-             ...(qp !== undefined && qpOpening !== undefined && { qprv: { H_open: qp.H_open, opening: qpOpening } }) };
+             ...(avPocket !== undefined && { airPocketMax: avPocket }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
