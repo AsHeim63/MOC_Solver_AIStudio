@@ -1,1 +1,4 @@
 @import "tailwindcss";
+
+/* Q24: engineering report — A4 pages */
+@page { size: A4; margin: 12mm; }

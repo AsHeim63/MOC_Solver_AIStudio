@@ -52,6 +52,7 @@ import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALV
 import { sizeQprv, QprvStudy, peakAll } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
+import { Report } from './report';   // Q24
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -193,6 +194,7 @@ export default function App() {
   const [avStudy, setAvStudy] = useState<AirValveStudy | null>(null);
   // Q21: QPRV sizing study (valve-closure scenarios); null until "Size QPRV".
   const [qpStudy, setQpStudy] = useState<QprvStudy | null>(null);
+  const [showReport, setShowReport] = useState(false);   // Q24: engineering report page
   // Q15: device package approved in the user preferences (air valves = the only device type now).
   // Not approved -> no protected results are shown.
   const [avApproved, setAvApproved] = useState<boolean>(() => {
@@ -798,6 +800,28 @@ export default function App() {
     return `Distance: ${isFinite(n) ? n.toFixed(1) : label} m`;
   };
 
+  // Q24: the report replaces the app page while open (print shows only the report).
+  if (showReport && results) {
+    const pumped = scenario !== 'gravity-valve';
+    const data: [string, string][] = [
+      ...(scenario === 'gravity-valve' ? [['Pressure at X = 0', `${inletPressure} m`] as [string, string]] : []),
+      ...(pumped ? [['Initial flow', `${pump.initialFlow} m³/s`], ['Suction pressure', `${suctionText} m`]] as [string, string][] : []),
+      ...(scenario === 'pump-trip'
+        ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]] as [string, string][]
+        : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
+           ['Closure exponent', String(valveExponent)]] as [string, string][]),
+      [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, `${outletPressure} m`],
+      ['Elevation at X = 0', `${sourceElevation} m`],
+    ];
+    const name = scenario === 'pump-trip' ? 'Pump-Operation — pump trip'
+      : `Valve-Operation, Source: ${scenario === 'gravity-valve' ? 'Reservoir' : 'Pump'} — valve closure`;
+    return (
+      <Report pipes={pipes} scenario={scenario} scenarioName={name} scenarioData={data}
+        unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy}
+        domain={yAxisDomain} onClose={() => setShowReport(false)} />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100">
       {/* Header */}
@@ -1329,7 +1353,14 @@ export default function App() {
                   className="space-y-8"
                 >
                   {/* Q15: stage-1 results = Unprotected System; results with devices = Protected System */}
-                  <h2 className="text-xl font-black text-slate-900">{protectedShown ? 'Protected System' : 'Unprotected System'}</h2>
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-xl font-black text-slate-900 mr-auto">{protectedShown ? 'Protected System' : 'Unprotected System'}</h2>
+                    {/* Q24: large screen only */}
+                    <button onClick={() => { setIsAnimating(false); setShowReport(true); }}
+                      className="hidden lg:inline-flex px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-100">
+                      Print / Save as PDF
+                    </button>
+                  </div>
 
                   {/* Summary Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
