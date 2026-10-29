@@ -84,8 +84,16 @@ export function fmt(qty: Qty, unit: string, v: number, dec = DEC[unit] ?? 2): st
   return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
 }
 
-/** Q27: a gauge head [m of water] in a pressure unit (for a head difference, H - z, already in m). */
-export const headToPressure = (unit: string, m: number): number => fromCalc('pressure', unit, m);
+/** Q27: a valve size given in mm, shown in the diameter unit. */
+export const fmtMm = (unit: string, mm: number): string => fmt('diameter', unit, mm / 1000);
+
+type ProfileNode = { x: number; elevation: number; maxHead: number; minHead: number; steadyHead: number };
+/** Q27: result nodes with their distance, elevation and heads in the length unit `unit`. */
+export const nodesInLength = <N extends ProfileNode>(nodes: N[], unit: string): N[] =>
+  nodes.map(n => {
+    const L = (v: number) => fromCalc('length', unit, v);
+    return { ...n, x: L(n.x), elevation: L(n.elevation), maxHead: L(n.maxHead), minHead: L(n.minHead), steadyHead: L(n.steadyHead) };
+  });
 
 /** Display form: 6 significant digits, no trailing zeros. */
 export const show6 = (v: number): string => (Number.isFinite(v) ? String(Number(v.toPrecision(6))) : String(v));

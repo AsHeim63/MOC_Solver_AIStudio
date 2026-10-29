@@ -9,7 +9,7 @@ import type { Scenario } from './scenario_dispatch';
 import { AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { QprvStudy } from './surge_valves';
 import { ProfileIcons, profileIcons } from './profile_icons';
-import { Qty, fmt, fromCalc, show6 } from './units';   // Q27: shown in the chosen units
+import { Qty, fmt, fmtMm, fromCalc, show6, nodesInLength } from './units';   // Q27: shown in the chosen units
 
 type U = Record<Qty, string>;
 
@@ -22,7 +22,7 @@ function Envelope({ r, scenario, domain, airValves = [], u }:
   { r: SimulationResults; scenario: Scenario; domain: [number, number] | [any, any]; airValves?: { x: number; nonSlam: boolean }[]; u: U }) {
   // Q27: plotted in the length unit (domain arrives already in it).
   const L = (v: number) => fromCalc('length', u.length, v);
-  const nodes = r.nodes.map(n => ({ ...n, x: L(n.x), elevation: L(n.elevation), maxHead: L(n.maxHead), minHead: L(n.minHead), steadyHead: L(n.steadyHead) }));
+  const nodes = nodesInLength(r.nodes, u.length);
   return (
     <LineChart width={CHART_W} height={CHART_H} data={nodes} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -69,8 +69,8 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
   const total = pipes.reduce((s, p) => s + p.length, 0);
   const td = 'py-0.5 pr-3';
   const sh = (qty: Qty, v: number) => show6(fromCalc(qty, u[qty], v));   // line data: 6 significant digits, as the inputs
-  const inUnit = (mm: number) => fmt('diameter', u.diameter, mm / 1000);   // a valve size given in mm
-  const avProps = { scenario, domain, u };
+  const inUnit = (mm: number) => fmtMm(u.diameter, mm);
+  const envProps = { scenario, domain, u };
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans">
       <div className="print:hidden flex justify-end gap-2 max-w-[720px] mx-auto px-4 pt-4">
@@ -109,7 +109,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
         <section data-q24="unprotected" className="break-inside-avoid">
           <H2>Unprotected System</H2>
           <MaxMin r={unprotected} u={u} />
-          <Envelope r={unprotected} {...avProps} />
+          <Envelope r={unprotected} {...envProps} />
         </section>
 
         <section data-q24="protected" className="break-inside-avoid">
@@ -118,7 +118,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
           {avStudy && (<>
             <h3 className="font-bold mb-1">Air valves</h3>
             <MaxMin r={avStudy.stage2} u={u} />
-            <Envelope r={avStudy.stage2} {...avProps} airValves={avStudy.valves} />
+            <Envelope r={avStudy.stage2} {...envProps} airValves={avStudy.valves} />
             <h3 className="font-bold mt-2 mb-1">Parts list</h3>
             {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
               <p>No air valves needed.</p>
@@ -143,7 +143,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
           {qpStudy && (<>
             <h3 className="font-bold mt-3 mb-1">QPRV</h3>
             <MaxMin r={qpStudy.stage2} u={u} />
-            <Envelope r={qpStudy.stage2} {...avProps} />
+            <Envelope r={qpStudy.stage2} {...envProps} />
             <p className="mt-1">Parts list: one QPRV, size {inUnit(qpStudy.qprv.size_mm)} {u.diameter}, {u.valve} {fmt('valve', u.valve, qpStudy.qprv.Kv)}, closing time {qpStudy.qprv.closingTime} s.</p>
           </>)}
         </section>

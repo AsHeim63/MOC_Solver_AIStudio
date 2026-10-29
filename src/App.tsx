@@ -54,7 +54,7 @@ import { scenarioFromControl, Operation, ValveSource } from './scenario_control'
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
 import { projectText, parseProject } from './project_file';   // Q25
-import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, headToPressure } from './units';   // Q26, Q27
+import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, fmtMm, nodesInLength } from './units';   // Q26, Q27
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -313,7 +313,7 @@ export default function App() {
   const uu = unitsOf(unitChoice);
   // Q27: results are SI; shown converted. L = a length / head / elevation / distance in the length unit.
   const L = (v: number) => fromCalc('length', uu.length, v);
-  const inUnit = (mm: number) => fmt('diameter', uu.diameter, mm / 1000);   // a valve size given in mm
+  const inUnit = (mm: number) => fmtMm(uu.diameter, mm);
 
 
   // Persistence Effects
@@ -781,9 +781,8 @@ export default function App() {
     const tB = fh[b].time;
     const alpha = tB === tA ? 0 : Math.max(0, Math.min(1, (animTime - tA) / (tB - tA)));
     // Q27: plotted in the length unit (factor 1 in Metric, so the Metric numbers are unchanged).
-    return results.nodes.map((node, i) => ({
+    return nodesInLength(results.nodes, uu.length).map((node, i) => ({
       ...node,
-      x: L(node.x), elevation: L(node.elevation), maxHead: L(node.maxHead), minHead: L(node.minHead), steadyHead: L(node.steadyHead),
       currentHead: L(fh[a].heads[i] * (1 - alpha) + fh[b].heads[i] * alpha)
     }));
   }, [results, currentFrame, animTime, uu.length]);
@@ -840,7 +839,7 @@ export default function App() {
     return results.fullHistory.map(f => ({
       time: f.time,
       head: f.heads[selectedNodeIdx],
-      pressure: headToPressure(uu.pressure, f.heads[selectedNodeIdx] - elev),
+      pressure: fromCalc('pressure', uu.pressure, f.heads[selectedNodeIdx] - elev),
       flow: fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0),
       vaporVolume: fromCalc('volume', uu.volume, f.vapors ? f.vapors[selectedNodeIdx] : 0)
     }));
@@ -853,7 +852,7 @@ export default function App() {
     if (!r || z === undefined) return { pressure: auto, flow: auto };
     const span = (v: number[]) => [Math.floor(Math.min(...v)), Math.ceil(Math.max(...v))] as [number, number];
     return {
-      pressure: span(r.fullHistory.map(f => headToPressure(uu.pressure, f.heads[selectedNodeIdx] - z))),
+      pressure: span(r.fullHistory.map(f => fromCalc('pressure', uu.pressure, f.heads[selectedNodeIdx] - z))),
       flow: span(r.fullHistory.map(f => fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0))),
     };
   }, [avStudy, selectedNodeIdx, uu.pressure, uu.flow]);
@@ -902,7 +901,7 @@ export default function App() {
          ['Pump curve', 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
-      : [[`Valve ${uu.valve}`, uu.valve === 'Kv' ? `${fmt('valve', 'Kv', valveKv0)} m³/h` : `${fmt('valve', 'Cv', valveKv0)} gpm at 1 psi`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
+      : [[`Valve ${uu.valve}`, `${fmt('valve', uu.valve, valveKv0)} ${uu.valve === 'Kv' ? 'm³/h' : 'gpm at 1 psi'}`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
          ['Closure exponent', String(valveExponent)]]) as [string, string][],
       [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, show('pressure', outletPressure)],
       ['Elevation at X = 0', show('length', sourceElevation)]);
