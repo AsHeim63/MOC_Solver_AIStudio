@@ -73,5 +73,19 @@ export function unitsOf(c: UnitChoice): Record<Qty, string> {
 /** A pressure unit that is a height of water column (m, ft). */
 export const isHeadUnit = (u: string): boolean => u === 'm' || u === 'ft';
 
+/** Q27: decimals a result is shown with, per unit (any unit not listed: 2). */
+const DEC: Record<string, number> = {
+  'm³/h': 1, 'm³/s': 4, 'L/s': 1, gpm: 1, 'ft³/s': 3, barg: 3, kPag: 1, mm: 0, in: 2, 'm/s': 3, 'ft/s': 3, Kv: 1, Cv: 1,
+};
+
+/** Q27: a calc-unit (SI) result as shown in `unit`: fixed decimals (per unit unless given), no "-0". */
+export function fmt(qty: Qty, unit: string, v: number, dec = DEC[unit] ?? 2): string {
+  const s = fromCalc(qty, unit, v).toFixed(dec);
+  return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
+}
+
+/** Q27: a gauge head [m of water] in a pressure unit (for a head difference, H - z, already in m). */
+export const headToPressure = (unit: string, m: number): number => fromCalc('pressure', unit, m);
+
 /** Display form: 6 significant digits, no trailing zeros. */
 export const show6 = (v: number): string => (Number.isFinite(v) ? String(Number(v.toPrecision(6))) : String(v));

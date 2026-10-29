@@ -144,7 +144,7 @@ function finding(code: GateCode, kind: GateKind, where: string, message: string)
 const A1_VERIFIED_VELOCITY_MIN = 0.5;   // m/s — RESULTS_S64 §5, lowest V with measured agreement
 
 /** A2's ceiling — `SPEC_S63.md` §4.2, given directly by the spec. */
-const A2_VELOCITY_MAX = 3.0;            // m/s
+export const A2_VELOCITY_MAX = 3.0;     // m/s (exported for the Q27 display text)
 
 /** A3's proximity band — `SPEC_S63.md` §4.2, given directly by the spec. */
 const A3_VAPOUR_MARGIN_M = 2.0;         // m

@@ -13,9 +13,9 @@
 // firstNode..lastNode, which holds on a series main (BACKLOG: pipeIds/pipeParams pairing).
 
 import { VAPOR_HEAD_AT, GateCode, G } from './solver';
-import { GateCheck, GateReport } from './gate_checks';
+import { GateCheck, GateReport, A2_VELOCITY_MAX } from './gate_checks';
 import { NodeRow, ReachRow, ProfileView } from './gate_view';
-import { RHO_WATER } from './units';   // Q26: the one rho
+import { RHO_WATER, fmt, UnitSystem } from './units';   // Q26: the one rho; Q27: US gate lines
 
 /** Display-only unit factor: 1 m of water = rho*g/1e5 bar, rho = RHO_WATER, g = solver G. */
 export const BAR_PER_M = RHO_WATER * G / 1e5;
@@ -232,13 +232,20 @@ export interface GateMessage {
 /** Assaf's cap (ANSWERS 2026-10-04 Q3): at most 5 notes. */
 export const MAX_NOTES = 5;
 
-export function gateMessage(report: GateReport): GateMessage {
+/** Q27: the lines that carry a unit, in US units (plan §3): A2's ceiling from the gate constant, B6 "(Cv)". */
+const US_LINE: Partial<Record<GateCode, string>> = {
+    A2: `Velocity above ${fmt('velocity', 'ft/s', A2_VELOCITY_MAX)} ft/s`,
+    B6: 'Invalid valve coefficient (Cv)',
+};
+
+export function gateMessage(report: GateReport, system: UnitSystem = 'metric'): GateMessage {
     const problems: string[] = [];
     const notes: string[] = [];
+    const lineOf = (c: GateCode) => (system === 'us' ? US_LINE[c] : undefined) ?? PROBLEM_LINE[c];
     for (const c of report.checks) {
         const k = classifyCheck(c);
-        if (k === 'fail-blocking' && !problems.includes(PROBLEM_LINE[c.code])) problems.push(PROBLEM_LINE[c.code]);
-        const note = `Note: ${PROBLEM_LINE[c.code]}`;
+        if (k === 'fail-blocking' && !problems.includes(lineOf(c.code))) problems.push(lineOf(c.code));
+        const note = `Note: ${lineOf(c.code)}`;
         if (k === 'fail-advisory' && !notes.includes(note)) notes.push(note);
     }
     if (report.stateError !== undefined) problems.push(STEADY_FAILED_LINE);

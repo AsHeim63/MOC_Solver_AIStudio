@@ -54,7 +54,7 @@ import { scenarioFromControl, Operation, ValveSource } from './scenario_control'
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
 import { projectText, parseProject } from './project_file';   // Q25
-import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit } from './units';   // Q26
+import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, headToPressure } from './units';   // Q26, Q27
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
 // The gate engine, wired for the first time. It has been in this project since 2026-08-31 and has
 // never executed: nothing imported it. Nothing is GATED by it yet either — the run below proceeds
@@ -86,21 +86,21 @@ function UnitInput({ qty, unit = '', value, onValue, className, step, min }: {
 }
 
 /** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
-function GateTooltip({ active, payload, caveats }: { active?: boolean; payload?: any[]; caveats?: string[] }) {
+function GateTooltip({ active, payload, caveats, u }: { active?: boolean; payload?: any[]; caveats?: string[]; u: Record<Qty, string> }) {
   if (!active || !payload || payload.length === 0) return null;
   const t = tooltipFields(payload[0].payload as GateChartPoint);
   const hp = t.headAndPressure;
   return (
     <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-3 text-[11px] font-mono min-w-[18rem]">
       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-        <span>DISTANCE {t.distance.toFixed(1)} m</span>
-        <span>TOTAL HEAD {fixedNoNegZero(hp.head, 2)} m</span>
-        <span>ELEVATION {t.elevation.toFixed(2)} m</span>
-        <span>PRESSURE {fixedNoNegZero(hp.pressureM, 2)} m ({fixedNoNegZero(hp.pressureBar, 2)} bar)</span>
+        <span>DISTANCE {fmt('length', u.length, t.distance, 1)} {u.length}</span>
+        <span>TOTAL HEAD {fmt('length', u.length, hp.head)} {u.length}</span>
+        <span>ELEVATION {fmt('length', u.length, t.elevation)} {u.length}</span>
+        <span>PRESSURE {fmt('pressure', u.pressure, hp.pressureM)} {u.pressure}</span>
         {t.flow.map(f => (
           <React.Fragment key={f.pipeId}>
-            <span>FLOW {f.m3s.toFixed(4)} m³/s ({f.m3h.toFixed(1)} m³/h){t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
-            <span>VELOCITY {f.velocity.toFixed(3)} m/s</span>
+            <span>FLOW {fmt('flow', u.flow, f.m3s)} {u.flow}{t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
+            <span>VELOCITY {fmt('velocity', u.velocity, f.velocity)} {u.velocity}</span>
           </React.Fragment>
         ))}
       </div>
@@ -116,8 +116,8 @@ function GateTooltip({ active, payload, caveats }: { active?: boolean; payload?:
  * this one view of `gateMessage` (ANSWERS 2026-10-03 Q2, 2026-10-04 Q3). No codes, no check list,
  * no log. Notes are plain text: no fail styling, they never read as a problem.
  */
-function GateMessageView({ report }: { report: GateReport }) {
-  const m = gateMessage(report);
+function GateMessageView({ report, system }: { report: GateReport; system: UnitSystem }) {
+  const m = gateMessage(report, system);
   return (
     <div data-gate-message={m.passed ? 'pass' : 'fail'} className="space-y-0.5">
       {m.passed ? (
@@ -311,6 +311,9 @@ export default function App() {
     try { localStorage.setItem('hg_units', JSON.stringify(unitChoice)); } catch { /* not persisted */ }
   }, [unitChoice]);
   const uu = unitsOf(unitChoice);
+  // Q27: results are SI; shown converted. L = a length / head / elevation / distance in the length unit.
+  const L = (v: number) => fromCalc('length', uu.length, v);
+  const inUnit = (mm: number) => fmt('diameter', uu.diameter, mm / 1000);   // a valve size given in mm
 
 
   // Persistence Effects
@@ -777,11 +780,13 @@ export default function App() {
     const tA = fh[a].time;
     const tB = fh[b].time;
     const alpha = tB === tA ? 0 : Math.max(0, Math.min(1, (animTime - tA) / (tB - tA)));
+    // Q27: plotted in the length unit (factor 1 in Metric, so the Metric numbers are unchanged).
     return results.nodes.map((node, i) => ({
       ...node,
-      currentHead: fh[a].heads[i] * (1 - alpha) + fh[b].heads[i] * alpha
+      x: L(node.x), elevation: L(node.elevation), maxHead: L(node.maxHead), minHead: L(node.minHead), steadyHead: L(node.steadyHead),
+      currentHead: L(fh[a].heads[i] * (1 - alpha) + fh[b].heads[i] * alpha)
     }));
-  }, [results, currentFrame, animTime]);
+  }, [results, currentFrame, animTime, uu.length]);
 
   // Q14: every later stage keeps the stage-1 (unprotected) axis scale.
   const scaleResults = avStudy?.stage1 ?? results;
@@ -794,6 +799,9 @@ export default function App() {
     const yMax = Math.round(maxHead + 10);
     return [yMin, yMax] as [number, number];
   }, [scaleResults]);
+  // Q27: the same scale in the length unit, widened to whole units so the ticks still span Max / Min Head.
+  const yAxisShown = (typeof yAxisDomain[0] === 'number'
+    ? [Math.floor(L(yAxisDomain[0])), Math.ceil(L(yAxisDomain[1]))] : yAxisDomain) as [any, any];
 
  // Selectable nodes: upstream boundary + all pipe-to-pipe junction nodes
   const selectableNodes = useMemo(() => {
@@ -809,10 +817,10 @@ export default function App() {
         const d = Math.abs(results.nodes[i].x - cumL);
         if (d < bestDiff) { bestDiff = d; best = i; }
       }
-      arr.push({ idx: best, label: `Junction ${pi + 1}–${pi + 2} (x=${cumL.toFixed(1)} m)`, x: cumL });
+      arr.push({ idx: best, label: `Junction ${pi + 1}–${pi + 2} (x=${fmt('length', uu.length, cumL, 1)} ${uu.length})`, x: cumL });
     }
     return arr;
-  }, [results, pipes, scenario]);
+  }, [results, pipes, scenario, uu.length]);
 
   // Clamp selection if pipe count changes
   React.useEffect(() => {
@@ -828,14 +836,15 @@ export default function App() {
     if (!results || !results.nodes[selectedNodeIdx]) return [];
     const node = results.nodes[selectedNodeIdx];
     const elev = node.elevation;
+    // Q27: plotted in the chosen units (pressure, flow, volume).
     return results.fullHistory.map(f => ({
       time: f.time,
       head: f.heads[selectedNodeIdx],
-      pressure: f.heads[selectedNodeIdx] - elev,
-      flow: f.flows ? f.flows[selectedNodeIdx] : 0,
-      vaporVolume: f.vapors ? f.vapors[selectedNodeIdx] : 0
+      pressure: headToPressure(uu.pressure, f.heads[selectedNodeIdx] - elev),
+      flow: fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0),
+      vaporVolume: fromCalc('volume', uu.volume, f.vapors ? f.vapors[selectedNodeIdx] : 0)
     }));
-  }, [results, selectedNodeIdx]);
+  }, [results, selectedNodeIdx, uu.pressure, uu.flow, uu.volume]);
 
   // Q14: pressure / flow tab axes from stage 1 at the selected node (auto without a study).
   const tabYDomain = useMemo(() => {
@@ -844,10 +853,10 @@ export default function App() {
     if (!r || z === undefined) return { pressure: auto, flow: auto };
     const span = (v: number[]) => [Math.floor(Math.min(...v)), Math.ceil(Math.max(...v))] as [number, number];
     return {
-      pressure: span(r.fullHistory.map(f => f.heads[selectedNodeIdx] - z)),
-      flow: span(r.fullHistory.map(f => (f.flows ? f.flows[selectedNodeIdx] : 0))),
+      pressure: span(r.fullHistory.map(f => headToPressure(uu.pressure, f.heads[selectedNodeIdx] - z))),
+      flow: span(r.fullHistory.map(f => fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0))),
     };
-  }, [avStudy, selectedNodeIdx]);
+  }, [avStudy, selectedNodeIdx, uu.pressure, uu.flow]);
 
   // Effective t_max for tab charts given current zoom level
   const effectiveTabTMax = useMemo(() => {
@@ -867,36 +876,42 @@ export default function App() {
   // Envelope-chart tooltip: distance with 1 decimal; all series except Pipeline show pressure (head − elevation)
   const envelopeTooltipFormatter = (value: any, name: string, props: any): [string, string] => {
     if (typeof value !== 'number') return [String(value), name];
-    if (name === 'Pipeline') return [value.toFixed(2) + ' m', 'Elevation'];
+    // Q27: the plotted values are in the length unit; pressure = H - z formed there, then shown in the pressure unit.
+    if (name === 'Pipeline') return [value.toFixed(2) + ' ' + uu.length, 'Elevation'];
     const elev = props?.payload?.elevation ?? 0;
-    return [(value - elev).toFixed(2) + ' m', name + ' (Pressure)'];
+    return [fmt('pressure', uu.pressure, toCalc('length', uu.length, value - elev)) + ' ' + uu.pressure, name + ' (Pressure)'];
   };
   const envelopeLabelFormatter = (label: any) => {
     const n = typeof label === 'number' ? label : parseFloat(label);
-    return `Distance: ${isFinite(n) ? n.toFixed(1) : label} m`;
+    return `Distance: ${isFinite(n) ? n.toFixed(1) : label} ${uu.length}`;
   };
 
   // Q24: the report replaces the app page while open (print shows only the report).
   if (showReport && results) {
     // Q25 (Q24 open item): the scenario's own inputs only.
+    // Q27: in the chosen units, 6 significant digits as the input boxes (a blank or bad curve cell stays as typed).
+    const show = (qty: Qty, v: number | string) => {
+      const t = String(v);
+      return t.trim() === '' || !Number.isFinite(Number(t)) ? t : `${show6(fromCalc(qty, uu[qty], Number(t)))} ${uu[qty]}`;
+    };
     const data: [string, string][] = scenario === 'gravity-valve'
-      ? [['Pressure at X = 0', `${inletPressure} m`]]
+      ? [['Pressure at X = 0', show('pressure', inletPressure)]]
       : scenario === 'pump-valve'
-      ? [['Suction pressure', `${suctionText} m`], ['Pump curve', curveRows.map(r => `${r.Q} m³/s / ${r.H} m`).join('; ')]]
-      : [['Initial flow', `${pump.initialFlow} m³/s`],
+      ? [['Suction pressure', show('pressure', suctionText)], ['Pump curve', curveRows.map(r => `${show('flow', r.Q)} / ${show('length', r.H)}`).join('; ')]]
+      : [['Initial flow', show('flow', pump.initialFlow)],
          ['Pump curve', 'built-in (DOMAIN §5): shut-off head 1.33 × steady head, run-out flow 2 × initial flow']];
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
-      : [['Valve Kv', `${valveKv0.toFixed(1)} m³/h`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
+      : [[`Valve ${uu.valve}`, uu.valve === 'Kv' ? `${fmt('valve', 'Kv', valveKv0)} m³/h` : `${fmt('valve', 'Cv', valveKv0)} gpm at 1 psi`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
          ['Closure exponent', String(valveExponent)]]) as [string, string][],
-      [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, `${outletPressure} m`],
-      ['Elevation at X = 0', `${sourceElevation} m`]);
+      [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, show('pressure', outletPressure)],
+      ['Elevation at X = 0', show('length', sourceElevation)]);
     const name = scenario === 'pump-trip' ? 'Pump-Operation — pump trip'
       : `Valve-Operation, Source: ${scenario === 'gravity-valve' ? 'Reservoir' : 'Pump'} — valve closure`;
     return (
       <Report pipes={pipes} scenario={scenario} scenarioName={name} scenarioData={data}
         unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy}
-        domain={yAxisDomain} onClose={() => setShowReport(false)} />
+        domain={yAxisShown} u={uu} onClose={() => setShowReport(false)} />
     );
   }
 
@@ -962,7 +977,7 @@ export default function App() {
               </span>
             ) : gateReport && view !== 'gate' ? (
               <div data-gate-status className="text-[11px] leading-tight max-w-[24rem]">
-                <GateMessageView report={gateReport} />
+                <GateMessageView report={gateReport} system={unitChoice.system} />
               </div>
             ) : null}
             {/* Screen 1: `Run Steady-State` evaluates the gate only (PLAN_S68 §2 D7).
@@ -1455,7 +1470,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Head</p>
                         <p className="text-xl font-black text-slate-900">
-                          {Math.max(...results.nodes.map(n => n.maxHead)).toFixed(2)} <span className="text-xs font-normal text-slate-500">m</span>
+                          {fmt('length', uu.length, Math.max(...results.nodes.map(n => n.maxHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
                       </div>
                     </div>
@@ -1466,7 +1481,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Min Head</p>
                         <p className="text-xl font-black text-slate-900">
-                          {Math.min(...results.nodes.map(n => n.minHead)).toFixed(2)} <span className="text-xs font-normal text-slate-500">m</span>
+                          {fmt('length', uu.length, Math.min(...results.nodes.map(n => n.minHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
                       </div>
                     </div>
@@ -1477,7 +1492,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Vapor / Air</p>
                         <p className="text-xl font-black text-slate-900">
-                          {(Math.max(...results.nodes.map(n => n.maxVaporVolume)) * 1000).toFixed(2)} <span className="text-xs font-normal text-slate-500">L</span>
+                          {fmt('volume', uu.volume, Math.max(...results.nodes.map(n => n.maxVaporVolume)))} <span className="text-xs font-normal text-slate-500">{uu.volume}</span>
                         </p>
                       </div>
                     </div>
@@ -1508,14 +1523,14 @@ export default function App() {
                         ) : (
                           <table className="w-full text-left">
                             <thead className="text-slate-400 uppercase text-[10px]">
-                              <tr><th className="py-1">Type</th><th>Location (m)</th><th>Size (mm)</th><th>Inlet / outlet (mm)</th><th>Non-Slam</th></tr>
+                              <tr><th className="py-1">Type</th><th>Location ({uu.length})</th><th>Size ({uu.diameter})</th><th>Inlet / outlet ({uu.diameter})</th><th>Non-Slam</th></tr>
                             </thead>
                             <tbody>
                               {avStudy.valves.map(v => (
                                 <tr key={v.x} className="border-t border-slate-100">
                                   <td className="py-1">{v.nonSlam ? 'Non-Slam air valve' : 'Air valve'}</td>
-                                  <td>{v.x.toFixed(0)}</td><td>{v.inlet_mm}</td>
-                                  <td>{v.inlet_mm} / {shownOutletMm(v)}</td>
+                                  <td>{fmt('length', uu.length, v.x, 0)}</td><td>{inUnit(v.inlet_mm)}</td>
+                                  <td>{inUnit(v.inlet_mm)} / {inUnit(shownOutletMm(v))}</td>
                                   <td>{v.nonSlam ? 'Yes' : 'No'}</td>
                                 </tr>
                               ))}
@@ -1523,7 +1538,7 @@ export default function App() {
                           </table>
                         )}
                         {avStudy.unresolved.length > 0 && (
-                          <p className="mt-2 text-amber-700">Target not met (valve {MIN_GAUGE_HEAD_M} m, line {ADD_VALVE_HEAD_M} m) at x ={avStudy.unresolved.map(x => x.toFixed(0)).join(', ')} m.</p>
+                          <p className="mt-2 text-amber-700">Target not met (valve {fmt('pressure', uu.pressure, MIN_GAUGE_HEAD_M)} {uu.pressure}, line {fmt('pressure', uu.pressure, ADD_VALVE_HEAD_M)} {uu.pressure}) at x ={avStudy.unresolved.map(x => fmt('length', uu.length, x, 0)).join(', ')} {uu.length}.</p>
                         )}
                       </div>
                     )}
@@ -1542,8 +1557,8 @@ export default function App() {
                     </div>
                     {qpStudy && (
                       <p className="mt-4 text-xs text-slate-700">
-                        Size {qpStudy.qprv.size_mm} mm, Kv {qpStudy.qprv.Kv}, closing time {qpStudy.qprv.closingTime} s,
-                        max head {qpStudy.maxHead.toFixed(2)} m (Unprotected {peakAll(qpStudy.stage1).toFixed(2)} m);
+                        Size {inUnit(qpStudy.qprv.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, qpStudy.qprv.Kv)}, closing time {qpStudy.qprv.closingTime} s,
+                        max head {fmt('length', uu.length, qpStudy.maxHead)} {uu.length} (Unprotected {fmt('length', uu.length, peakAll(qpStudy.stage1))} {uu.length});
                         {' '}{qpStudy.tried.length} runs.
                         {!qpStudy.tried.some(t => t.returns) &&
                           <span className="text-amber-700"> No table size holds the head at the closing pressure.</span>}
@@ -1634,15 +1649,15 @@ export default function App() {
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                             <XAxis 
                               dataKey="x" 
-                              label={{ value: 'Distance (m)', position: 'insideBottom', offset: -10, fontSize: 11, fontWeight: 600 }}
+                              label={{ value: `Distance (${uu.length})`, position: 'insideBottom', offset: -10, fontSize: 11, fontWeight: 600 }}
                               tick={{ fontSize: 10 }}
                               tickFormatter={(val) => Math.round(val).toString()}
                             />
                             <YAxis 
-                              label={{ value: 'Head (m)', angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
+                              label={{ value: `Head (${uu.length})`, angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
                               tick={{ fontSize: 10 }}
                               tickFormatter={(val) => Math.round(val).toString()}
-                              domain={yAxisDomain}
+                              domain={yAxisShown}
                             />
                             <Tooltip
                               contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
@@ -1661,8 +1676,9 @@ export default function App() {
                             <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                             <Line name="Current HGL" type="linear" dataKey="currentHead" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 2 }} isAnimationActive={false} />
                             {results && results.nodes.length > 1 && (
-                              <ProfileIcons pts={results.nodes.map(n => ({ x: n.x, z: n.elevation }))}
-                                icons={profileIcons(scenario, results.nodes[results.nodes.length - 1].x, protectedShown ? avStudy.valves : [])} />
+                              <ProfileIcons pts={results.nodes.map(n => ({ x: L(n.x), z: L(n.elevation) }))}
+                                icons={profileIcons(scenario, L(results.nodes[results.nodes.length - 1].x),
+                                  protectedShown ? avStudy.valves.map(v => ({ ...v, x: L(v.x) })) : [])} />
                             )}
                           </LineChart>
                         </ResponsiveContainer>
@@ -1765,7 +1781,7 @@ export default function App() {
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [Number(v).toFixed(2) + ' m', 'Pressure']}
+                                  formatter={(v: any) => [Number(v).toFixed(2) + ' ' + uu.pressure, 'Pressure']}
                                 />
                                 <Line type="linear" dataKey="pressure" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
                               </LineChart>
@@ -1778,7 +1794,7 @@ export default function App() {
                         <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                           <div className="mb-6">
                             <h3 className="text-base font-bold text-orange-600">Vapor Volume</h3>
-                            <p className="text-xs text-slate-500">Cavity volume at {selectableNodes.find(n => n.idx === selectedNodeIdx)?.label ?? 'selected node'} (Liters)</p>
+                            <p className="text-xs text-slate-500">Cavity volume at {selectableNodes.find(n => n.idx === selectedNodeIdx)?.label ?? 'selected node'} ({uu.volume === 'L' ? 'Liters' : 'US gallons'})</p>
                           </div>
                           <div className="h-[300px] w-full">
                             <ResponsiveContainer width="100%" height="100%">
@@ -1798,11 +1814,11 @@ export default function App() {
                                   tick={{ fontSize: 10 }}
                                   tickFormatter={(val) => Math.round(val).toString()}
                                 />
-                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Number((val * 1000).toPrecision(3)).toString()} />
+                                <YAxis tick={{ fontSize: 10 }} tickFormatter={(val) => Number(val.toPrecision(3)).toString()} />
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [(Number(v) * 1000).toFixed(2) + ' L', 'Vapor Volume']}
+                                  formatter={(v: any) => [Number(v).toFixed(2) + ' ' + uu.volume, 'Vapor Volume']}
                                 />
                                 <Area type="linear" dataKey="vaporVolume" stroke="#f97316" fillOpacity={1} fill="url(#colorVapor)" strokeWidth={2} isAnimationActive={false} />
                               </AreaChart>
@@ -1833,7 +1849,7 @@ export default function App() {
                                 <Tooltip
                                   contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                                   labelFormatter={(l: any) => `Time: ${Number(l).toFixed(2)} s`}
-                                  formatter={(v: any) => [Number(v).toFixed(4) + ' m³/s', 'Flow']}
+                                  formatter={(v: any) => [Number(v).toFixed(4) + ' ' + uu.flow, 'Flow']}
                                 />
                                 <Line type="linear" dataKey="flow" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} />
                               </LineChart>
@@ -1857,6 +1873,8 @@ export default function App() {
         const mode = summaryMode(gateReport);
         const caveats = numberCaveats(gateReport);
         const s = gateSummary;
+        // Q27: the chart's plotted values in the length unit; the tooltip reads the SI row it carries (p.row).
+        const gateChartShown = gateChart.map(p => ({ ...p, distance: L(p.distance), elevation: L(p.elevation), head: L(p.head) }));
         // The ruled warnings (ANSWERS 2026-10-02 Q2), shown beside every place the numbers appear.
         const caveatBox = caveats.length > 0 && (
           <div data-caveats className="mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs font-bold text-amber-700 space-y-1">
@@ -1865,7 +1883,7 @@ export default function App() {
         );
         const fmtNode = (label: string, n: { head: number; pressure: number; distance: number }) => (
           <div className="flex justify-between gap-2"><span className="text-slate-500">{label}</span>
-            <span className="font-mono">H {fixedNoNegZero(n.head, 2)} m · p {fixedNoNegZero(n.pressure, 2)} m</span></div>
+            <span className="font-mono">H {fmt('length', uu.length, n.head)} {uu.length} · p {fmt('pressure', uu.pressure, n.pressure)} {uu.pressure}</span></div>
         );
         return (
       <main data-screen="gate" className="max-w-screen-2xl mx-auto px-4 py-8 flex gap-6">
@@ -1876,20 +1894,20 @@ export default function App() {
           {gateProfile ? (
             <div className="h-[460px]">
               <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-                <LineChart data={gateChart} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
+                <LineChart data={gateChartShown} margin={{ top: 10, right: 30, left: 0, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                   <XAxis dataKey="distance" type="number" domain={['dataMin', 'dataMax']}
-                    label={{ value: 'Distance (m)', position: 'insideBottom', offset: -5, fontSize: 11, fontWeight: 600 }}
+                    label={{ value: `Distance (${uu.length})`, position: 'insideBottom', offset: -5, fontSize: 11, fontWeight: 600 }}
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} />
-                  <YAxis label={{ value: 'Head (m)', angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
+                  <YAxis label={{ value: `Head (${uu.length})`, angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} domain={['auto', 'auto']} />
-                  <Tooltip content={<GateTooltip caveats={caveats} />} />
+                  <Tooltip content={<GateTooltip caveats={caveats} u={uu} />} />
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
                   <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
-                  {gateChart.length > 1 && (
-                    <ProfileIcons pts={gateChart.map(p => ({ x: p.distance, z: p.elevation }))}
-                      icons={profileIcons(scenario, gateChart[gateChart.length - 1].distance)} />
+                  {gateChartShown.length > 1 && (
+                    <ProfileIcons pts={gateChartShown.map(p => ({ x: p.distance, z: p.elevation }))}
+                      icons={profileIcons(scenario, gateChartShown[gateChartShown.length - 1].distance)} />
                   )}
                 </LineChart>
               </ResponsiveContainer>
@@ -1910,18 +1928,18 @@ export default function App() {
                 {caveatBox}
                 {gateReport.steady?.pump.curve && (
                   <div data-duty-point className="flex justify-between gap-2"><span className="text-slate-500">Duty point</span>
-                    <span className="font-mono">{gateReport.steady.pump.initialFlow.toFixed(4)} m³/s · {(gateReport.steady.init.prevState.H[0] - gateReport.steady.pump.curve.H_suct).toFixed(2)} m</span></div>
+                    <span className="font-mono">{fmt('flow', uu.flow, gateReport.steady.pump.initialFlow)} {uu.flow} · {fmt('length', uu.length, gateReport.steady.init.prevState.H[0] - gateReport.steady.pump.curve.H_suct)} {uu.length}</span></div>
                 )}
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Flow</span>
-                  <span className="font-mono">{s.flow.toFixed(4)} m³/s ({(s.flow * 3600).toFixed(1)} m³/h)</span></div>
+                  <span className="font-mono">{fmt('flow', uu.flow, s.flow)} {uu.flow}</span></div>
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Velocity</span>
                   <span className="font-mono">{s.velocityMin.reach === s.velocityMax.reach
-                    ? `${s.velocityMax.value.toFixed(3)} m/s`
-                    : `${s.velocityMin.value.toFixed(3)}–${s.velocityMax.value.toFixed(3)} m/s`}</span></div>
+                    ? `${fmt('velocity', uu.velocity, s.velocityMax.value)} ${uu.velocity}`
+                    : `${fmt('velocity', uu.velocity, s.velocityMin.value)}–${fmt('velocity', uu.velocity, s.velocityMax.value)} ${uu.velocity}`}</span></div>
                 {fmtNode('Inlet', s.inlet)}
                 {fmtNode('Outlet', s.outlet)}
                 <div className="flex justify-between gap-2"><span className="text-slate-500">Head loss along pipeline</span>
-                  <span className="font-mono">{s.headLossAlongPipeline.toFixed(2)} m</span></div>
+                  <span className="font-mono">{fmt('length', uu.length, s.headLossAlongPipeline)} {uu.length}</span></div>
               </>
             ) : (
               <p className="text-slate-500">No steady state was computed.</p>
@@ -1930,7 +1948,7 @@ export default function App() {
 
           <section data-rail="findings" className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-xs">
             <h4 className="font-bold text-sm text-slate-700 mb-2">System Check</h4>
-            <GateMessageView report={gateReport} />
+            <GateMessageView report={gateReport} system={unitChoice.system} />
           </section>
         </aside>
       </main>
@@ -1947,7 +1965,7 @@ export default function App() {
         return (
           <div data-gate-modal={passed ? 'pass' : 'fail'} className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 px-4">
             <div role="dialog" aria-modal="true" className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-full max-w-md text-sm">
-              <GateMessageView report={gateReport} />
+              <GateMessageView report={gateReport} system={unitChoice.system} />
               <div className="mt-5 flex justify-end">
                 <button
                   onClick={closeGateModal}
