@@ -2214,8 +2214,7 @@ function runCore(
         throw new Error(`QPRV: Cq (${qprv.Cq}) and closing time (${qprv.closingTime} s) must be finite and > 0.`);
     }
     const qp = qprv !== undefined && valve !== undefined ? {
-        node:   reservoirBCs[0].node,
-        H_open: QPRV_THRESHOLD_M + (upstreamReservoir !== undefined ? upstreamReservoir.head
+        H_open:QPRV_THRESHOLD_M + (upstreamReservoir !== undefined ? upstreamReservoir.head
                 : pump.curve !== undefined ? pump.curve.H_suct + pump.curve.c
                 : PUMP_TRIP_CURVE(pump, pumpHead).Hs),
         ...qprv
@@ -2356,7 +2355,11 @@ function runCore(
             const avE = valve !== undefined ? avAt?.get(bc.node) : undefined;
             let qpDone = false;   // Q19: the QPRV discharged and wrote the node (SECTION 7h)
             if (valve !== undefined && qp !== undefined) {
-                if (avAir.has(bc.node)) qpOpen = Math.max(0.0, qpOpen - grid.dt / qp.closingTime);   // air pocket: below atmospheric
+                // Air pocket (below atmospheric), or a vapour cavity at the shut valve: the QPRV closes
+                // at its closing rate and SECTION 7e (air valve / closed dead-end DGCM) keeps the node,
+                // so the cavity collapses through DC-4 mass balance before the QPRV may act.
+                const cavity = valve.Cv0 * evalTau(valve.law, t) <= 0.0 && prevState.V_g[bc.node] > 1e-12;
+                if (avAir.has(bc.node) || cavity) qpOpen = Math.max(0.0, qpOpen - grid.dt / qp.closingTime);
                 else ({ s: qpOpen, done: qpDone } =
                           CALC_BC_QPRV(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, qp, qpOpen));
             }

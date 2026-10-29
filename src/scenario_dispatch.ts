@@ -169,8 +169,8 @@ export interface DispatchInputs {
     /** Q14: air valves on the line (transient run only; the steady state ignores them).
      *  Absent or [] = today's run, bit-identical. */
     airValves?: AirValveBC[];
-    /** Q19: QPRV at the end valve, 'gravity-valve' and 'pump-valve' only (transient run only).
-     *  Absent = today's run, bit-identical. */
+    /** Q19: QPRV at the end valve, 'gravity-valve' and 'pump-valve' only (transient run only);
+     *  on 'pump-trip' dispatchSimulation throws. Absent = today's run, bit-identical. */
     qprv?: QprvInput;
 }
 
@@ -415,6 +415,9 @@ export function dispatchSimulation(
     const a = buildScenarioArgs(scenario, inputs);
     switch (a.kind) {
         case 'pump-trip': {
+            if (inputs.qprv !== undefined) {   // Q19: refused, never silently dropped
+                throw new Error(`QPRV is for valve-closure scenarios only ('gravity-valve', 'pump-valve'), not '${scenario}'.`);
+            }
             trace?.(runWaterHammerSimulation.name);   // label from the actual reference (audit S58 F7)
             return runWaterHammerSimulation(a.pipes, a.pump, a.reservoir, trace, inputs.airValves);
         }
