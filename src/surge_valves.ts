@@ -315,11 +315,11 @@ export function sizeSav(scenario: Scenario, inputs: DispatchInputs): SavStudy {
     if (best.refall) {
         let k = 0, cur = best;
         while (cur.refall && cur.t.closingTime < maximal) cur = trial(size, inRange(size, savClosingTime(t0, ++k, false)), hold);
-        chosen = cur.refall ? cur : trial(size, inRange(size, savClosingTime(t0, k, true)), hold);
         if (cur.refall) {
+            chosen = cur;
             notes.push(`SAV closing time: at the ${size} mm maximal closing time (${chosen.t.closingTime} s) the ` +
                        `pressure still falls below the low set (${lowSet.toFixed(2)} m) after the closing; not resolved`);
-        }
+        } else chosen = trial(size, inRange(size, savClosingTime(t0, k, true)), hold);
     } else {
         for (let k = -1; ; k--) {
             const ct = savClosingTime(t0, k, false);
@@ -332,6 +332,6 @@ export function sizeSav(scenario: Scenario, inputs: DispatchInputs): SavStudy {
 
     const sav = sel(size, chosen.t.closingTime, hold);
     const stage2 = run(sav);
-    return { stage1, stage2, sav, lowSet, highSet, firstSize_mm, runTime: sav.runTime,
-             notes: [...(hold !== undefined ? [SAV_NOTE_EAS] : []), ...notes], maxHead: peakAll(stage2), tried };
+    if (hold !== undefined) notes.unshift(SAV_NOTE_EAS);
+    return { stage1, stage2, sav, lowSet, highSet, firstSize_mm, runTime: sav.runTime, notes, maxHead: peakAll(stage2), tried };
 }
