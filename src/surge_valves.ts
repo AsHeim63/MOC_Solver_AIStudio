@@ -90,10 +90,11 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
     const tried: QprvTrial[] = [];
     type Run = { q: QprvStudy['qprv']; r: SimulationResults; t: QprvTrial };
     const trial = (size_mm: number, closingTime: number): Run => {
-        const q: QprvStudy['qprv'] = { size_mm, Kv: SURGE_VALVE_TABLE[size_mm][2], closingTime, runTime: T_unprot + closingTime,
-                                       ...(closingTime > SURGE_VALVE_TABLE[size_mm][1] && { steppedClosure: true as const }) };
+        const [, maximal, Kv] = SURGE_VALVE_TABLE[size_mm];
+        const q: QprvStudy['qprv'] = { size_mm, Kv, closingTime, runTime: T_unprot + closingTime,
+                                       ...(closingTime > maximal && { steppedClosure: true as const }) };
         const r = dispatchSimulation(scenario, { ...base, qprv: q });
-        const t = { size_mm, closingTime, Kv: q.Kv, ...judgeQprv(r) };
+        const t = { size_mm, closingTime, Kv, ...judgeQprv(r) };
         tried.push(t);
         return { q, r, t };
     };
@@ -137,9 +138,8 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
         }
         if (stepped) notes.unshift(QPRV_NOTE_STEPPED);
     }
-    const stage2 = chosen.r;
-    return { stage1, stage2, qprv: chosen.q, firstSize_mm: first.size_mm, runTime: chosen.q.runTime, notes,
-             maxHead: peakAll(stage2), tried };
+    return { stage1, stage2: chosen.r, qprv: chosen.q, firstSize_mm: first.size_mm, runTime: chosen.q.runTime, notes,
+             maxHead: peakAll(chosen.r), tried };
 }
 
 // ── Q22: SAV size, closing time and hold-open found automatically ─────────────────────────────────────

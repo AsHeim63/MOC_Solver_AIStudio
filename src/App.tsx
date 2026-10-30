@@ -684,10 +684,9 @@ export default function App() {
     qprvWorker.current = w;
     const done = (study: QprvStudy | null, error?: string) => {
       if (qprvWorker.current !== w) return;
-      w.terminate(); qprvWorker.current = null;
+      stopQprvStudy();
       if (study) { setQpStudy(study); setSimError(null); }
       else { console.error("QPRV sizing failed", error); setSimError(error ?? 'QPRV sizing failed'); }
-      setIsSimulating(false);
     };
     w.onmessage = (e: MessageEvent<{ study?: QprvStudy; error?: string }>) => done(e.data.study ?? null, e.data.error);
     w.onerror = (e: ErrorEvent) => done(null, e.message);
