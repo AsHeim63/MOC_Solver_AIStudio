@@ -2233,12 +2233,13 @@ function runCore(
     // Unprotected run (runWaterHammerSimulation, SAV_LOW_SET); high set = steady pump outlet
     // pressure + 7 m (O5). Its opening `svOpen` is set each step by SAV_OPENING. Shut = SECTION 7c /
     // 7g unchanged.
-    if (sav !== undefined && !(Number.isFinite(sav.Cq) && sav.Cq > 0 &&
-                               Number.isFinite(sav.closingTime) && sav.closingTime > 0)) {
-        throw new Error(`SAV: Cq (${sav.Cq}) and closing time (${sav.closingTime} s) must be finite and > 0.`);
-    }
-    if (sav !== undefined && (valve !== undefined || upstreamReservoir !== undefined || pump.curve !== undefined)) {
-        throw new Error('SAV: pump trip with the built-in pump curve only.');
+    if (sav !== undefined) {
+        if (!(Number.isFinite(sav.Cq) && sav.Cq > 0 && Number.isFinite(sav.closingTime) && sav.closingTime > 0)) {
+            throw new Error(`SAV: Cq (${sav.Cq}) and closing time (${sav.closingTime} s) must be finite and > 0.`);
+        }
+        if (valve !== undefined || upstreamReservoir !== undefined || pump.curve !== undefined) {
+            throw new Error('SAV: pump trip with the built-in pump curve only.');
+        }
     }
     const sv = sav && { ...sav, p_high: pumpHead - prevState.Z[0] + SAV_HIGH_M };
     let svOpen = 0.0, svLatched = false;   // latched: the low set fired once (hold-open)
@@ -2319,12 +2320,12 @@ function runCore(
                 if (p0 < sv.p_low) svLatched = true;
                 svOpen = SAV_OPENING(sv, svOpen, p0, grid.dt,
                                      svLatched && sv.holdOpenUntil !== undefined && t <= sv.holdOpenUntil);
-                const alpha = PUMP_ALPHA(pump, t), Qf = Q_feed16;
+                const alpha = PUMP_ALPHA(pump, t);
                 if (svOpen > 0.0 && (newState.V_g[0] <= 1e-12 ||
                     (alpha < PUMP_STOP_ALPHA && av0 === undefined && newState.H[0] >= prevState.Z[0]))) {
                     CALC_BC_SAV(0, coefsPump, prevState, newState, newFlow, grid.dt, svOpen * sv.Cq,
                         alpha < PUMP_STOP_ALPHA ? () => 0.0
-                        : Qf !== undefined ? () => Qf
+                        : Q_feed16 !== undefined ? () => Q_feed16
                         : (H: number) => PUMP_TRIP_Q_AT(pump, pumpHead, alpha, H));
                 }
             }
