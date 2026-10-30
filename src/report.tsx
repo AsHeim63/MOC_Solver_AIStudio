@@ -70,7 +70,7 @@ export interface SolutionSet {
 
 /** The sets sized so far. The SAV runs carry the air valves placed by the previous run (the App drops the
  *  SAV study whenever the air valves change). The QPRV study runs without air valves (Q21). */
-export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValves: SolutionSet['airValves']): SolutionSet[] {
+export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValves: AirValve[]): SolutionSet[] {
   const out: SolutionSet[] = [];
   if (sv) {
     const { size_mm, Kv, closingTime } = sv.sav;
@@ -88,7 +88,8 @@ export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValve
 const NAME = { sav: 'SAV (surge anticipating valve)', qprv: 'QPRV (quick pressure relief valve)' };
 
 /** One table per set: air valves and surge valves, the columns of both (— where a column does not apply). */
-export function PartsList({ set, u, td = 'py-1 pr-3' }: { set: SolutionSet; u: U; td?: string }) {
+export function PartsList({ set, u }: { set: SolutionSet; u: U }) {
+  const td = 'py-1 pr-3';
   const mm = (v: number) => fmtMm(u.diameter, v);
   return (
     <table className="w-full text-left">
