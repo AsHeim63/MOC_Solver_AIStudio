@@ -824,6 +824,10 @@ export default function App() {
   const scaleResults = avStudy?.stage1 ?? results;
   const protectedShown = !!avStudy && results === avStudy.stage2;   // Q15 heading
   const sets = solutionSets(svStudy, qpStudy, avStudy?.valves ?? []);   // Q23
+  const avInSet = sets.find(s => s.airValves.length > 0);   // Q23: the air valves are listed once, in that set
+  // Q23: SAV / QPRV icons on the main profile (sized = ticked: unticking drops the study). The SAV set carries
+  // the air valves, so it shows with them; the QPRV runs without air valves, so not over the air-valve runs' Unprotected view.
+  const surgeIcons = sets.flatMap(s => s.devices).filter(d => d.kind === 'sav' ? protectedShown : !avStudy || protectedShown);
   const yAxisDomain = useMemo(() => {
     if (!scaleResults) return ['auto', 'auto'] as [any, any];
     const minYValue = Math.min(...scaleResults.nodes.map(n => Math.min(n.elevation, n.minHead)));
@@ -943,6 +947,7 @@ export default function App() {
     return (
       <Report pipes={pipes} scenario={scenario} scenarioName={name} scenarioData={data}
         unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy} svStudy={svStudy}
+        pkg={{ av: avApproved, qprv: qprvApproved, sav: savApproved }}
         axis={yAxisShown} u={uu} onClose={() => setShowReport(false)} />
     );
   }
@@ -1557,7 +1562,7 @@ export default function App() {
                     </div>
                     {protectedShown && (
                       <div className="mt-4 text-xs">
-                        {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
+                        {avInSet ? <p className="text-slate-500">Listed in the "{avInSet.name}" parts list below.</p> : avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
                           <p className="text-slate-500">No air valves needed.</p>
                         ) : (
                           <table className="w-full text-left">
@@ -1632,7 +1637,8 @@ export default function App() {
                   {/* Q23: Protected System, one unit per solution set (devices, envelope, parts list) */}
                   {sets.length > 0 && (
                   <section data-q23="sets" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 text-xs">
-                    <h3 className="text-lg font-bold">Protected System — solution sets</h3>
+                    {/* one "Protected System" heading: the top one when it already says so */}
+                    <h3 className="text-lg font-bold">{protectedShown ? 'Solution sets' : 'Protected System'}</h3>
                     {sets.map(s => <React.Fragment key={s.name}><SetView set={s} scenario={scenario} axis={yAxisShown} u={uu} /></React.Fragment>)}
                   </section>
                   )}
@@ -1748,7 +1754,8 @@ export default function App() {
                             {results && results.nodes.length > 1 && (
                               <ProfileIcons pts={results.nodes.map(n => ({ x: L(n.x), z: L(n.elevation) }))}
                                 icons={profileIcons(scenario, L(results.nodes[results.nodes.length - 1].x),
-                                  protectedShown ? avStudy.valves.map(v => ({ ...v, x: L(v.x) })) : [])} />
+                                  protectedShown ? avStudy.valves.map(v => ({ ...v, x: L(v.x) })) : [],
+                                  surgeIcons.map(d => ({ kind: d.kind, x: L(d.x) })))} />
                             )}
                           </LineChart>
                         </ResponsiveContainer>

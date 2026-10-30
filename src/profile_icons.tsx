@@ -39,10 +39,12 @@ function Glyph({ kind }: { kind: ProfileIconKind }) {
         <rect x={-4} y={-15} width={8} height={6} fill="#fff" stroke={S} strokeWidth={1.5} /></>);
     case 'sav':
     case 'qprv':   // Q23: surge valve above its node, as the air valve: stem foot at y = 0, valve body, label;
-                   // the body clears an air valve at the same node (air-valve icon top y = -30)
-      return (<><line x1={0} y1={0} x2={0} y2={-34} stroke={S} strokeWidth={2} />
-        <path d="M-8,-45 L8,-35 L8,-45 L-8,-35 Z" fill="#fff" stroke={S} strokeWidth={2} />
-        <text y={-48} textAnchor="middle" fontSize={7} fontWeight={700} fill={S}>{kind === 'sav' ? 'SAV' : 'QPRV'}</text></>);
+                   // the body clears an air valve at the same node (air-valve icon top y = -30) by a visible
+                   // gap of stem, and the label has a white halo so lines and icons below it do not cross it
+      return (<><line x1={0} y1={0} x2={0} y2={-40} stroke={S} strokeWidth={2} />
+        <path d="M-8,-51 L8,-41 L8,-51 L-8,-41 Z" fill="#fff" stroke={S} strokeWidth={2} />
+        <text y={-55} textAnchor="middle" fontSize={8} fontWeight={700} fill={S} stroke="#fff" strokeWidth={3}
+          paintOrder="stroke">{kind === 'sav' ? 'SAV' : 'QPRV'}</text></>);
     default: {   // air valve: stem foot at y = 0, circle above it, triangle on top
       const ns = kind === 'air-valve-ns';
       return (<><line x1={0} y1={0} x2={0} y2={-8} stroke={S} strokeWidth={2} />

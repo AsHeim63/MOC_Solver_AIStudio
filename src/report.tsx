@@ -80,10 +80,15 @@ export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValve
   if (qp) {
     const end = qp.stage2.nodes[qp.stage2.nodes.length - 1], H_open = qp.stage2.qprv?.H_open;
     out.push({ name: 'QPRV', result: qp.stage2, airValves: [],
-      devices: [{ kind: 'qprv', x: end.x, ...qp.qprv, sets: H_open === undefined ? [] : [['set', H_open - end.elevation]] }] });
+      devices: [{ kind: 'qprv', x: end.x, ...qp.qprv, sets: H_open === undefined ? []
+        : [['set', H_open - end.elevation], ['reference', H_open - QPRV_SET_ABOVE_REF_M - end.elevation]] }] });
   }
   return out;
 }
+
+// The solver opens the QPRV above reference + 7 m (solver.ts QPRV_THRESHOLD_M, ruling 2026-10-28; Q19), so
+// reference = H_open − 7 m. solver.ts does not export it and stays unchanged in a display row (LOOK-AT Q23).
+const QPRV_SET_ABOVE_REF_M = 7.0;
 
 const NAME = { sav: 'SAV (surge anticipating valve)', qprv: 'QPRV (quick pressure relief valve)' };
 
@@ -96,7 +101,7 @@ export function PartsList({ set, u }: { set: SolutionSet; u: U }) {
       <thead className="text-slate-500 text-[10px] uppercase">
         <tr><th className={td}>Type</th><th className={td}>Location ({u.length})</th><th className={td}>Size ({u.diameter})</th>
           <th className={td}>Inlet / outlet ({u.diameter})</th><th className={td}>Non-Slam</th><th className={td}>{u.valve}</th>
-          <th className={td}>Set pressure ({u.pressure})</th><th className={td}>Closing time (s)</th></tr>
+          <th className={td}>Set / reference pressure ({u.pressure})</th><th className={td}>Closing time (s)</th></tr>
       </thead>
       <tbody>
         {set.airValves.map(v => (
@@ -145,12 +150,13 @@ export interface ReportProps {
   avStudy: AirValveStudy | null;
   qpStudy: QprvStudy | null;
   svStudy: SavStudy | null;              // Q23
+  pkg: { av: boolean; qprv: boolean; sav: boolean };   // Q23: devices ticked in the preferences' device package
   axis: Axis | null;                     // the screen's (Unprotected) head-axis scale, in the length unit
   u: U;                                    // Q27: the unit of each quantity (units.ts unitsOf)
   onClose: () => void;
 }
 
-export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, svStudy, axis, u, onClose }: ReportProps) {
+export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, svStudy, pkg, axis, u, onClose }: ReportProps) {
   // The button means "print now": open the browser's print once the page has drawn.
   React.useEffect(() => { const t = setTimeout(() => window.print(), 400); return () => clearTimeout(t); }, []);
   const total = pipes.reduce((s, p) => s + p.length, 0);
@@ -159,6 +165,10 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
   const inUnit = (mm: number) => fmtMm(u.diameter, mm);
   const envProps = { scenario, axis, u };
   const sets = solutionSets(svStudy, qpStudy, avStudy?.valves ?? []);   // Q23
+  // Q23: the air valves are listed once: in the set that carries them, if one is sized.
+  const avInSet = sets.find(s => s.airValves.length > 0);
+  const runs = [pkg.av && 'Size air valves', pkg.sav && scenario === 'pump-trip' && 'Size SAV',
+                pkg.qprv && scenario !== 'pump-trip' && 'Size QPRV'].filter((t): t is string => !!t).map(t => `"${t}"`);
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans">
       <div className="print:hidden flex justify-end gap-2 max-w-[720px] mx-auto px-4 pt-4">
@@ -205,13 +215,15 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
 
         <section data-q24="protected" className="break-inside-avoid">
           <H2>Protected System</H2>
-          {!avStudy && sets.length === 0 && <p>No protection sized: run "Size air valves", "Size SAV" or "Size QPRV" on the results screen first.</p>}
+          {!avStudy && sets.length === 0 && <p>No protection sized: {runs.length === 0
+            ? 'no device is ticked in the preferences\' device package.'
+            : `run ${runs.length > 1 ? runs.slice(0, -1).join(', ') + ' or ' + runs[runs.length - 1] : runs[0]} on the results screen first.`}</p>}
           {avStudy && (<>
             <h3 className="font-bold mb-1">Air valves</h3>
             <MaxMin r={avStudy.stage2} u={u} />
             <Envelope r={avStudy.stage2} {...envProps} airValves={avStudy.valves} />
             <h3 className="font-bold mt-2 mb-1">Parts list</h3>
-            {avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
+            {avInSet ? <p>Listed in the "{avInSet.name}" parts list below.</p> : avStudy.valves.length === 0 ? (avStudy.unresolved.length === 0 &&
               <p>No air valves needed.</p>
             ) : (
               <table className="w-full text-left">
