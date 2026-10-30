@@ -49,7 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
-import { sizeQprv, QprvStudy, peakAll, sizeSav, SavStudy } from './surge_valves';
+import { sizeQprv, QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
@@ -227,6 +227,7 @@ export default function App() {
     setAvApproved(on);
     try { localStorage.setItem('hg_pkg_air_valves', on ? '1' : '0'); } catch { /* storage blocked */ }
     if (!on && avStudy) { setIsAnimating(false); setResults(avStudy.stage1); setAvStudy(null); }
+    if (!on) setSvStudy(null);   // Q22: a SAV result never outlives the air valves it was sized with
   };
   const [isSimulating, setIsSimulating] = useState(false);
 
@@ -588,7 +589,7 @@ export default function App() {
     setValveExponent(p.valve.exponent); setValveCheckValve(p.valve.checkValve);
     setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
     // Results on screen belong to the old inputs.
-    setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setReportKey(null); setSimError(null);
+    setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setSvStudy(null); setReportKey(null); setSimError(null);
     setGateReport(null); setGateProfile(null); setGateCrash(null); setView('input');
   };
 
@@ -646,6 +647,7 @@ export default function App() {
         dropReportIfInputsChanged();
         const study = sizeAirValves(scenario, buildDispatchInputs());
         setAvStudy(study);
+        setSvStudy(null);   // Q22: sized with the previous air valves
         setResults(study.stage2);
         setSimError(null);
       } catch (error) {
@@ -677,11 +679,13 @@ export default function App() {
   // Q22: SAV size, closing time and hold-open searched from the system with the air valves placed
   // (ANSWERS 2026-10-29); background, as the QPRV.
   const handleSizeSav = () => {
+    if (!avStudy) return;   // the air-valve stage first (button disabled until it has run)
+    const airValves = avStudy.valves;
     setIsSimulating(true);
     setTimeout(() => {
       try {
         dropReportIfInputsChanged();
-        setSvStudy(sizeSav(scenario, { ...buildDispatchInputs(), airValves: avStudy?.valves ?? [] }));
+        setSvStudy(sizeSav(scenario, { ...buildDispatchInputs(), airValves }));
         setSimError(null);
       } catch (error) {
         console.error("SAV sizing failed", error);
@@ -1591,18 +1595,19 @@ export default function App() {
                   <section data-q22="sav" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">SAV</h3>
-                      <button onClick={handleSizeSav} disabled={isSimulating}
+                      <button onClick={handleSizeSav} disabled={isSimulating || !avStudy}
                         className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
                         Size SAV
                       </button>
                     </div>
+                    {!avStudy && <p className="mt-4 text-xs text-slate-500">Size the air valves first.</p>}
                     {svStudy && (
                       <p className="mt-4 text-xs text-slate-700">
                         Size {inUnit(svStudy.sav.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, svStudy.sav.Kv)}, closing time {svStudy.sav.closingTime} s,
                         low / high set {fmt('pressure', uu.pressure, svStudy.lowSet)} / {fmt('pressure', uu.pressure, svStudy.highSet)} {uu.pressure},
                         max head {fmt('length', uu.length, svStudy.maxHead)} {uu.length} (without SAV {fmt('length', uu.length, peakAll(svStudy.stage1))} {uu.length});
                         {' '}{svStudy.tried.length} runs.
-                        {svStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}{svStudy.sav.holdOpenUntil !== undefined && ` (held open until ${svStudy.sav.holdOpenUntil.toFixed(1)} s)`}.</span>)}
+                        {svStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}{n === SAV_NOTE_EAS && svStudy.sav.holdOpenUntil !== undefined && ` (held open until ${svStudy.sav.holdOpenUntil.toFixed(1)} s)`}.</span>)}
                       </p>
                     )}
                   </section>

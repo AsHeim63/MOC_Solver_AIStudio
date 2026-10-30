@@ -96,6 +96,9 @@ export interface SimulationResults {
     // Q21: only with a QPRV (SECTION 7h). H_open = reference + 7 m [m]; opening = its opening s ∈ [0,1]
     // per fullHistory entry. Unhashed telemetry, read by the sizing stage (surge_valves.ts).
     qprv?: { H_open: number; opening: number[] };
+    // Q22: only with a SAV (SECTION 7i). opening = its opening s ∈ [0,1] per fullHistory entry, as
+    // qprv.opening. Unhashed telemetry, read by the sizing stage (surge_valves.ts).
+    sav?: { opening: number[] };
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2243,6 +2246,7 @@ function runCore(
     }
     const sv = sav && { ...sav, p_high: pumpHead - prevState.Z[0] + SAV_HIGH_M };
     let svOpen = 0.0, svLatched = false;   // latched: the low set fired once (hold-open)
+    const svTele = sv && { opening: [svOpen] };   // Q22 telemetry, aligned as qpTele
 
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
@@ -2465,6 +2469,7 @@ function runCore(
             endFlows: captureEndFlows(prevFlow, pipes)
         });
         qpTele?.opening.push(qpOpen);
+        svTele?.opening.push(svOpen);
 
         // 7. Early-exit: check if transient has settled
         if (t > pump.haltTime + 4.0 * travelTime) {
@@ -2536,7 +2541,8 @@ function runCore(
 
     return { timeSteps, nodes, timeHistory, fullHistory, paths,
              ...(avPocket !== undefined && { airPocketMax: avPocket }),
-             ...(qpTele !== undefined && { qprv: qpTele }) };
+             ...(qpTele !== undefined && { qprv: qpTele }),
+             ...(svTele !== undefined && { sav: svTele }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
