@@ -264,14 +264,12 @@ export function sizeSav(scenario: Scenario, inputs: DispatchInputs): SavStudy {
 
     // §4.3-4.6 per size, first closing time: the pressure rises above static inside (pump stop,
     // t_max − 10 s) → held open to t_max − 10 s ("Electrically Actuated SAV"), run again.
-    const bySize = new Map<number, Run>();
+    const bySize: Run[] = [];   // each size is visited once (down from the first size, or up from it)
     const atSize = (size: number): Run => {
-        const seen = bySize.get(size);
-        if (seen) return seen;
         const ct = inRange(size, savClosingTime(savFirstClosingTime(size), 0, false));
         let r = trial(size, ct);
         if (r.firstRise > trip && r.firstRise < holdEnd) r = trial(size, ct, holdEnd);
-        bySize.set(size, r);
+        bySize.push(r);
         return r;
     };
     // §4.5: the first size does not rise → smaller sizes until one rises. §4.6: it rises → larger sizes
@@ -280,7 +278,7 @@ export function sizeSav(scenario: Scenario, inputs: DispatchInputs): SavStudy {
     if (!best.t.rises) {
         while (i > 0 && !best.t.rises) best = atSize(SIZES[--i]);
         // Builder decision (LOOK-AT): no size rises above static → the lowest max head tried.
-        if (!best.t.rises) best = [...bySize.values()].reduce((b, r) => (r.t.maxHead < b.t.maxHead ? r : b));
+        if (!best.t.rises) best = bySize.reduce((b, r) => (r.t.maxHead < b.t.maxHead ? r : b));
     } else {
         for (let j = i + 1; j < SIZES.length; j++) {
             const r = atSize(SIZES[j]);
