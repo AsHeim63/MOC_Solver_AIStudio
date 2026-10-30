@@ -52,7 +52,7 @@ import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALV
 import { sizeQprv, QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
-import { Report } from './report';   // Q24
+import { Report, SetView, solutionSets } from './report';   // Q24, Q23
 import { projectText, parseProject } from './project_file';   // Q25
 import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, fmtMm, nodesInLength, niceAxis, valveBasis } from './units';   // Q26, Q27
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
@@ -229,6 +229,14 @@ export default function App() {
     if (!on && avStudy) { setIsAnimating(false); setResults(avStudy.stage1); setAvStudy(null); }
     if (!on) setSvStudy(null);   // Q22: a SAV result never outlives the air valves it was sized with
   };
+  // Q23: QPRV and SAV in the device package. No stored choice = approved (their sections were always shown
+  // before Q23). Not approved -> no section, no result, no row, no icon.
+  const pkgRead = (key: string) => { try { return localStorage.getItem(key) !== '0'; } catch { return true; } };
+  const pkgWrite = (key: string, on: boolean) => { try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* storage blocked */ } };
+  const [qprvApproved, setQprvApproved] = useState<boolean>(() => pkgRead('hg_pkg_qprv'));
+  const [savApproved, setSavApproved] = useState<boolean>(() => pkgRead('hg_pkg_sav'));
+  const approveQprv = (on: boolean) => { setQprvApproved(on); pkgWrite('hg_pkg_qprv', on); if (!on) setQpStudy(null); };
+  const approveSav = (on: boolean) => { setSavApproved(on); pkgWrite('hg_pkg_sav', on); if (!on) setSvStudy(null); };
   const [isSimulating, setIsSimulating] = useState(false);
 
     // ── Scenario control (Row 3.11 Unit C, D-7 — ruling R1) ───────────────────
@@ -815,6 +823,7 @@ export default function App() {
   // Q14: every later stage keeps the stage-1 (unprotected) axis scale.
   const scaleResults = avStudy?.stage1 ?? results;
   const protectedShown = !!avStudy && results === avStudy.stage2;   // Q15 heading
+  const sets = solutionSets(svStudy, qpStudy, avStudy?.valves ?? []);   // Q23
   const yAxisDomain = useMemo(() => {
     if (!scaleResults) return ['auto', 'auto'] as [any, any];
     const minYValue = Math.min(...scaleResults.nodes.map(n => Math.min(n.elevation, n.minHead)));
@@ -933,7 +942,7 @@ export default function App() {
       : `Valve-Operation, Source: ${scenario === 'gravity-valve' ? 'Reservoir' : 'Pump'} — valve closure`;
     return (
       <Report pipes={pipes} scenario={scenario} scenarioName={name} scenarioData={data}
-        unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy}
+        unprotected={avStudy?.stage1 ?? qpStudy?.stage1 ?? results} avStudy={avStudy} qpStudy={qpStudy} svStudy={svStudy}
         axis={yAxisShown} u={uu} onClose={() => setShowReport(false)} />
     );
   }
@@ -1308,6 +1317,13 @@ export default function App() {
                 className="accent-blue-600" />
               Air valves
             </label>
+            {([['QPRV (quick pressure relief valve)', qprvApproved, approveQprv],
+               ['SAV (surge anticipating valve)', savApproved, approveSav]] as const).map(([name, on, set]) => (
+              <label key={name} className="flex items-center gap-2 cursor-pointer text-sm text-slate-700">
+                <input type="checkbox" checked={on} onChange={e => set(e.target.checked)} className="accent-blue-600" />
+                {name}
+              </label>
+            ))}
           </section>
 
           {/* Boundary Conditions (Row 3.11 Unit C, D-4 — S68) ─────────────────────────────
@@ -1569,7 +1585,7 @@ export default function App() {
                   )}
 
                   {/* Q21: QPRV sizing (valve-closure scenarios) */}
-                  {scenario !== 'pump-trip' && (
+                  {qprvApproved && scenario !== 'pump-trip' && (
                   <section data-q21="qprv" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">QPRV</h3>
@@ -1591,7 +1607,7 @@ export default function App() {
                   )}
 
                   {/* Q22: SAV sizing (pump trip) */}
-                  {scenario === 'pump-trip' && (
+                  {savApproved && scenario === 'pump-trip' && (
                   <section data-q22="sav" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">SAV</h3>
@@ -1610,6 +1626,14 @@ export default function App() {
                         {svStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}{n === SAV_NOTE_EAS && svStudy.sav.holdOpenUntil !== undefined && ` (held open until ${svStudy.sav.holdOpenUntil.toFixed(1)} s)`}.</span>)}
                       </p>
                     )}
+                  </section>
+                  )}
+
+                  {/* Q23: Protected System, one unit per solution set (devices, envelope, parts list) */}
+                  {sets.length > 0 && (
+                  <section data-q23="sets" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 text-xs">
+                    <h3 className="text-lg font-bold">Protected System — solution sets</h3>
+                    {sets.map(s => <React.Fragment key={s.name}><SetView set={s} scenario={scenario} axis={yAxisShown} u={uu} /></React.Fragment>)}
                   </section>
                   )}
 

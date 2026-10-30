@@ -4,7 +4,7 @@
 import { useXAxisScale, useYAxisScale, ZIndexLayer, DefaultZIndexes } from 'recharts';
 import type { Scenario } from './scenario_dispatch';
 
-export type ProfileIconKind = 'air-valve' | 'air-valve-ns' | 'pump' | 'tank' | 'valve';
+export type ProfileIconKind = 'air-valve' | 'air-valve-ns' | 'pump' | 'tank' | 'valve' | 'sav' | 'qprv';
 export interface ProfileIcon { kind: ProfileIconKind; x: number }
 
 /** The devices the current app models: the scenario's two line ends, plus any placed air valves.
@@ -15,11 +15,14 @@ export interface ProfileIcon { kind: ProfileIconKind; x: number }
  *  Not drawn: the pump's check valve (solver.ts:1128/1200-1213) is part of the pump boundary, and
  *  ValveParams.check_valve (:2845) is a flag on the end valve; neither is a separate device and the
  *  pictures 1-5 have no check-valve symbol. No other in-line device exists in the app. */
-export function profileIcons(scenario: Scenario, L: number, airValves: { x: number; nonSlam: boolean }[] = []): ProfileIcon[] {
+/** Q23: `surgeValves` (SAV at x = 0, QPRV at x = L, O2) are listed first, so the end icon at the same node
+ *  is drawn over the foot of their stem. */
+export function profileIcons(scenario: Scenario, L: number, airValves: { x: number; nonSlam: boolean }[] = [],
+                             surgeValves: ProfileIcon[] = []): ProfileIcon[] {
   const ends: ProfileIcon[] = scenario === 'pump-trip' ? [{ kind: 'pump', x: 0 }, { kind: 'tank', x: L }]
     : scenario === 'gravity-valve' ? [{ kind: 'tank', x: 0 }, { kind: 'valve', x: L }]
     : [{ kind: 'pump', x: 0 }, { kind: 'valve', x: L }];
-  return [...ends, ...airValves.map(v => ({ kind: (v.nonSlam ? 'air-valve-ns' : 'air-valve') as ProfileIconKind, x: v.x }))];
+  return [...surgeValves, ...ends, ...airValves.map(v => ({ kind: (v.nonSlam ? 'air-valve-ns' : 'air-valve') as ProfileIconKind, x: v.x }))];
 }
 
 const S = '#1e293b';
@@ -34,6 +37,12 @@ function Glyph({ kind }: { kind: ProfileIconKind }) {
     case 'valve':
       return (<><path d="M-9,-6 L9,6 L9,-6 L-9,6 Z" fill={S} /><line x1={0} y1={0} x2={0} y2={-9} stroke={S} strokeWidth={1.5} />
         <rect x={-4} y={-15} width={8} height={6} fill="#fff" stroke={S} strokeWidth={1.5} /></>);
+    case 'sav':
+    case 'qprv':   // Q23: surge valve above its node, as the air valve: stem foot at y = 0, valve body, label;
+                   // the body clears an air valve at the same node (air-valve icon top y = -30)
+      return (<><line x1={0} y1={0} x2={0} y2={-34} stroke={S} strokeWidth={2} />
+        <path d="M-8,-45 L8,-35 L8,-45 L-8,-35 Z" fill="#fff" stroke={S} strokeWidth={2} />
+        <text y={-48} textAnchor="middle" fontSize={7} fontWeight={700} fill={S}>{kind === 'sav' ? 'SAV' : 'QPRV'}</text></>);
     default: {   // air valve: stem foot at y = 0, circle above it, triangle on top
       const ns = kind === 'air-valve-ns';
       return (<><line x1={0} y1={0} x2={0} y2={-8} stroke={S} strokeWidth={2} />

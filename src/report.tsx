@@ -6,8 +6,8 @@ import React from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Legend } from 'recharts';
 import { PipeSection, SimulationResults } from './types';
 import type { Scenario } from './scenario_dispatch';
-import { AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
-import { QprvStudy } from './surge_valves';
+import { AirValve, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
+import { QprvStudy, SavStudy } from './surge_valves';
 import { ProfileIcons, profileIcons } from './profile_icons';
 import { Axis, Qty, fmt, fmtMm, fromCalc, show6, nodesInLength } from './units';   // Q27: shown in the chosen units
 
@@ -18,8 +18,9 @@ const CHART_W = 640, CHART_H = 280;   // px; fits the A4 print width (210 mm −
 const maxHead = (r: SimulationResults) => Math.max(...r.nodes.map(n => n.maxHead));
 const minHead = (r: SimulationResults) => Math.min(...r.nodes.map(n => n.minHead));
 
-function Envelope({ r, scenario, axis, airValves = [], u }:
-  { r: SimulationResults; scenario: Scenario; axis: Axis | null; airValves?: { x: number; nonSlam: boolean }[]; u: U }) {
+function Envelope({ r, scenario, axis, airValves = [], devices = [], u }:
+  { r: SimulationResults; scenario: Scenario; axis: Axis | null; airValves?: { x: number; nonSlam: boolean }[];
+    devices?: SurgeDevice[]; u: U }) {
   // Q27: plotted in the length unit (the axis arrives already in it).
   const L = (v: number) => fromCalc('length', u.length, v);
   const nodes = nodesInLength(r.nodes, u.length);
@@ -38,7 +39,8 @@ function Envelope({ r, scenario, axis, airValves = [], u }:
       <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
       {nodes.length > 1 && (
         <ProfileIcons pts={nodes.map(n => ({ x: n.x, z: n.elevation }))}
-          icons={profileIcons(scenario, nodes[nodes.length - 1].x, airValves.map(v => ({ ...v, x: L(v.x) })))} />
+          icons={profileIcons(scenario, nodes[nodes.length - 1].x, airValves.map(v => ({ ...v, x: L(v.x) })),
+                              devices.map(d => ({ kind: d.kind, x: L(d.x) })))} />
       )}
     </LineChart>
   );
@@ -50,6 +52,89 @@ const MaxMin = ({ r, u }: { r: SimulationResults; u: U }) => (
   <p className="text-xs mb-2">Max Head <b>{fmt('length', u.length, maxHead(r))} {u.length}</b> &nbsp;·&nbsp; Min Head <b>{fmt('length', u.length, minHead(r))} {u.length}</b></p>
 );
 
+// ── Q23: solution sets ──────────────────────────────────────────────────────────────────────────────────
+// ANSWERS 2026-10-29 (all device rows): each solution set (air valves + SAV now, air valves + surge tank
+// later) is one unit: its devices, its envelope and its parts list. Display only.
+export interface SurgeDevice {
+  kind: 'sav' | 'qprv';
+  x: number;                 // [m]: SAV at the pump-outlet node, QPRV at the end-valve node (O2)
+  size_mm: number; Kv: number; closingTime: number;
+  sets: [string, number][];  // [label, gauge pressure at the node [m]]
+}
+export interface SolutionSet {
+  name: string;
+  result: SimulationResults;                        // the run with this set's devices
+  airValves: AirValve[];
+  devices: SurgeDevice[];
+}
+
+/** The sets sized so far. The SAV runs carry the air valves placed by the previous run (the App drops the
+ *  SAV study whenever the air valves change). The QPRV study runs without air valves (Q21). */
+export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValves: SolutionSet['airValves']): SolutionSet[] {
+  const out: SolutionSet[] = [];
+  if (sv) {
+    const { size_mm, Kv, closingTime } = sv.sav;
+    out.push({ name: 'Air valves + SAV', result: sv.stage2, airValves,
+      devices: [{ kind: 'sav', x: sv.stage2.nodes[0].x, size_mm, Kv, closingTime, sets: [['low', sv.lowSet], ['high', sv.highSet]] }] });
+  }
+  if (qp) {
+    const end = qp.stage2.nodes[qp.stage2.nodes.length - 1], H_open = qp.stage2.qprv?.H_open;
+    out.push({ name: 'QPRV', result: qp.stage2, airValves: [],
+      devices: [{ kind: 'qprv', x: end.x, ...qp.qprv, sets: H_open === undefined ? [] : [['set', H_open - end.elevation]] }] });
+  }
+  return out;
+}
+
+const NAME = { sav: 'SAV (surge anticipating valve)', qprv: 'QPRV (quick pressure relief valve)' };
+
+/** One table per set: air valves and surge valves, the columns of both (— where a column does not apply). */
+export function PartsList({ set, u, td = 'py-1 pr-3' }: { set: SolutionSet; u: U; td?: string }) {
+  const mm = (v: number) => fmtMm(u.diameter, v);
+  return (
+    <table className="w-full text-left">
+      <thead className="text-slate-500 text-[10px] uppercase">
+        <tr><th className={td}>Type</th><th className={td}>Location ({u.length})</th><th className={td}>Size ({u.diameter})</th>
+          <th className={td}>Inlet / outlet ({u.diameter})</th><th className={td}>Non-Slam</th><th className={td}>{u.valve}</th>
+          <th className={td}>Set pressure ({u.pressure})</th><th className={td}>Closing time (s)</th></tr>
+      </thead>
+      <tbody>
+        {set.airValves.map(v => (
+          <tr key={'av' + v.x} className="border-t border-slate-200">
+            <td className={td}>{v.nonSlam ? 'Non-Slam air valve' : 'Air valve'}</td>
+            <td className={td}>{fmt('length', u.length, v.x, 0)}</td><td className={td}>{mm(v.inlet_mm)}</td>
+            <td className={td}>{mm(v.inlet_mm)} / {mm(shownOutletMm(v))}</td><td className={td}>{v.nonSlam ? 'Yes' : 'No'}</td>
+            <td className={td}>—</td><td className={td}>—</td><td className={td}>—</td>
+          </tr>
+        ))}
+        {set.devices.map(d => (
+          <tr key={d.kind} className="border-t border-slate-200">
+            <td className={td}>{NAME[d.kind]}</td>
+            <td className={td}>{fmt('length', u.length, d.x, 0)}</td><td className={td}>{mm(d.size_mm)}</td>
+            <td className={td}>—</td><td className={td}>—</td><td className={td}>{fmt('valve', u.valve, d.Kv)}</td>
+            <td className={td}>{d.sets.map(([k, p]) => `${k} ${fmt('pressure', u.pressure, p)}`).join(' / ') || '—'}</td>
+            <td className={td}>{d.closingTime}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** A set as one unit [data-q23-set]: max/min head, envelope chart with its icons, parts list. */
+export function SetView({ set, scenario, axis, u }: { set: SolutionSet; scenario: Scenario; axis: Axis | null; u: U }) {
+  return (
+    <div data-q23-set={set.name} className="break-inside-avoid">
+      <h4 className="font-bold mt-3 mb-1">{set.name}</h4>
+      <MaxMin r={set.result} u={u} />
+      <div className="overflow-x-auto">
+        <Envelope r={set.result} scenario={scenario} axis={axis} airValves={set.airValves} devices={set.devices} u={u} />
+      </div>
+      <h5 className="font-bold mt-2 mb-1 text-xs">Parts list</h5>
+      <PartsList set={set} u={u} />
+    </div>
+  );
+}
+
 export interface ReportProps {
   pipes: PipeSection[];
   scenario: Scenario;
@@ -58,12 +143,13 @@ export interface ReportProps {
   unprotected: SimulationResults;
   avStudy: AirValveStudy | null;
   qpStudy: QprvStudy | null;
+  svStudy: SavStudy | null;              // Q23
   axis: Axis | null;                     // the screen's (Unprotected) head-axis scale, in the length unit
   u: U;                                    // Q27: the unit of each quantity (units.ts unitsOf)
   onClose: () => void;
 }
 
-export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, axis, u, onClose }: ReportProps) {
+export function Report({ pipes, scenario, scenarioName, scenarioData, unprotected, avStudy, qpStudy, svStudy, axis, u, onClose }: ReportProps) {
   // The button means "print now": open the browser's print once the page has drawn.
   React.useEffect(() => { const t = setTimeout(() => window.print(), 400); return () => clearTimeout(t); }, []);
   const total = pipes.reduce((s, p) => s + p.length, 0);
@@ -71,6 +157,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
   const sh = (qty: Qty, v: number) => show6(fromCalc(qty, u[qty], v));   // line data: 6 significant digits, as the inputs
   const inUnit = (mm: number) => fmtMm(u.diameter, mm);
   const envProps = { scenario, axis, u };
+  const sets = solutionSets(svStudy, qpStudy, avStudy?.valves ?? []);   // Q23
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans">
       <div className="print:hidden flex justify-end gap-2 max-w-[720px] mx-auto px-4 pt-4">
@@ -117,7 +204,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
 
         <section data-q24="protected" className="break-inside-avoid">
           <H2>Protected System</H2>
-          {!avStudy && !qpStudy && <p>No protection sized: run "Size air valves" or "Size QPRV" on the results screen first.</p>}
+          {!avStudy && sets.length === 0 && <p>No protection sized: run "Size air valves", "Size SAV" or "Size QPRV" on the results screen first.</p>}
           {avStudy && (<>
             <h3 className="font-bold mb-1">Air valves</h3>
             <MaxMin r={avStudy.stage2} u={u} />
@@ -143,12 +230,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
               </table>
             )}
           </>)}
-          {qpStudy && (<>
-            <h3 className="font-bold mt-3 mb-1">QPRV</h3>
-            <MaxMin r={qpStudy.stage2} u={u} />
-            <Envelope r={qpStudy.stage2} {...envProps} />
-            <p className="mt-1">Parts list: one QPRV, size {inUnit(qpStudy.qprv.size_mm)} {u.diameter}, {u.valve} {fmt('valve', u.valve, qpStudy.qprv.Kv)}, closing time {qpStudy.qprv.closingTime} s.</p>
-          </>)}
+          {sets.map(s => <React.Fragment key={s.name}><SetView set={s} {...envProps} /></React.Fragment>)}
         </section>
 
         <section className="break-inside-avoid">
