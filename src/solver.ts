@@ -2100,7 +2100,8 @@ function runCore(
     valve?: ValveParams,
     upstreamReservoir?: { head: number },  // S57 node-0 gravity dispatch (SECTION 7f; spec §1.4)
     airValves?: AirValveBC[],              // Q14: air valve nodes (SECTION 7g); absent/[] = none
-    qprv?: QprvBC                          // Q19: QPRV at the end valve (SECTION 7h); absent = none
+    qprv?: QprvBC,                         // Q19: QPRV at the end valve (SECTION 7h); absent = none
+    sav?: SavBC & { p_low: number }        // Q20: SAV at the pump outlet (SECTION 7i); absent = none
 ): SimulationResults {
 
     // `rawPipeParams` is returned by INIT_RUN_STATE (the gate reads it) but is not destructured here:
@@ -2227,6 +2228,21 @@ function runCore(
     // once per step, so equal lengths; measured, findings/q21/align_Q21.ts).
     const qpTele = qp && { H_open: qp.H_open, opening: [qpOpen] };
 
+    // Q20 SAV (SECTION 7i), pump trip only (built-in curve), at node 0: the pump outlet right after
+    // the check valve, the first air valve site (O2). Gauge pressure there: low set p_low from the
+    // Unprotected run (runWaterHammerSimulation, SAV_LOW_SET); high set = steady pump outlet
+    // pressure + 7 m (O5). Its opening `svOpen` is set each step by SAV_OPENING. Shut = SECTION 7c /
+    // 7g unchanged.
+    if (sav !== undefined && !(Number.isFinite(sav.Cq) && sav.Cq > 0 &&
+                               Number.isFinite(sav.closingTime) && sav.closingTime > 0)) {
+        throw new Error(`SAV: Cq (${sav.Cq}) and closing time (${sav.closingTime} s) must be finite and > 0.`);
+    }
+    if (sav !== undefined && (valve !== undefined || upstreamReservoir !== undefined || pump.curve !== undefined)) {
+        throw new Error('SAV: pump trip with the built-in pump curve only.');
+    }
+    const sv = sav && { ...sav, p_high: pumpHead - prevState.Z[0] + SAV_HIGH_M };
+    let svOpen = 0.0, svLatched = false;   // latched: the low set fired once (hold-open)
+
     // travelTime: use inputPipes when available (legacy path), else derive from layout
     const travelTime        = COMPUTE_TRAVEL_TIME(layout, inputPipes);
     // Q21: the QPRV sizing study runs longer (only the loop bound changes, so the first 40·L/a are
@@ -2275,6 +2291,7 @@ function runCore(
             CALC_BC_RESERVOIR_UP(0, coefsPump, prevState, newState, newFlow, upstreamReservoir.head);
         } else {
             const av0 = avAt?.get(0);
+            let Q_feed16: number | undefined;   // Q20: the Q16 known pump inflow, when that branch ran
             if (av0 !== undefined && PUMP_ALPHA(pump, t) < PUMP_STOP_ALPHA) {   // Q14: pump stopped
                 newFlow.setQin(0, 0.0);                    // check valve shut (DOMAIN §5 stopped branch)
                 newFlow.setQout(0, AIR_VALVE_END(0, av0,
@@ -2288,6 +2305,27 @@ function runCore(
                     newFlow.setQout(0, AIR_VALVE_END(0, av0,
                         { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false },
                         Q_feed));
+                    Q_feed16 = Q_feed;
+                }
+            }
+            if (sv !== undefined) {
+                // Q20 SAV (SECTION 7i): opening from the previous step's pressure. It discharges when
+                // the branch above left node 0 liquid, or (pump stopped, no air valve) holding only a
+                // gas body at or above atmospheric (DGCM free gas, or a cavity collapsing this step);
+                // that body is then filled within the step (its volume in continuity, CALC_BC_SAV).
+                // Pump face as that branch had it: the Q16 known inflow, the check valve shut, or the
+                // running curve. A cavity or an air pocket: no discharge (Q_s = 0 below atmospheric).
+                const p0 = prevState.H[0] - prevState.Z[0];
+                if (p0 < sv.p_low) svLatched = true;
+                svOpen = SAV_OPENING(sv, svOpen, p0, grid.dt,
+                                     svLatched && sv.holdOpenUntil !== undefined && t <= sv.holdOpenUntil);
+                const alpha = PUMP_ALPHA(pump, t), Qf = Q_feed16;
+                if (svOpen > 0.0 && (newState.V_g[0] <= 1e-12 ||
+                    (alpha < PUMP_STOP_ALPHA && av0 === undefined && newState.H[0] >= prevState.Z[0]))) {
+                    CALC_BC_SAV(0, coefsPump, prevState, newState, newFlow, grid.dt, svOpen * sv.Cq,
+                        alpha < PUMP_STOP_ALPHA ? () => 0.0
+                        : Qf !== undefined ? () => Qf
+                        : (H: number) => PUMP_TRIP_Q_AT(pump, pumpHead, alpha, H));
                 }
             }
         }
@@ -2533,11 +2571,16 @@ export function runWaterHammerSimulation(
     pump:       PumpParams,
     reservoir:  ReservoirParams,
     trace?:     (fn: string) => void,
-    airValves?: AirValveBC[]               // Q14
+    airValves?: AirValveBC[],              // Q14
+    sav?:       SavBC                      // Q20
 ): SimulationResults {
     const prep = PREPARE_pump(inputPipes, pump, reservoir, trace);
-    return runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes,
-                   undefined, undefined, airValves);
+    const run = (av?: AirValveBC[], sv?: SavBC & { p_low: number }) =>
+        runCore(prep.net, prep.layout, prep.pump, prep.reservoir, 'legacy', undefined, inputPipes,
+                undefined, undefined, av, undefined, sv);
+    if (sav === undefined) return run(airValves);
+    // Q20: the low set pressure comes from the Unprotected run (same inputs, no devices).
+    return run(airValves, { ...sav, p_low: SAV_LOW_SET(run(), pump.tripTime, reservoir.head) });
 }
 
 /**
@@ -3125,6 +3168,100 @@ function CALC_BC_QPRV(
     newState.V_g[idx]   = 1e-12;                   // liquid state: seed reset (SECTION 7e)
     newState.C_gas[idx] = prevState.C_gas[idx];    // preserved — never zeroed (Bug #3)
     return { s, done: true };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 7i — SAV (surge anticipating valve at the pump outlet — Q20)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Q20 SAV, solver-facing: the QPRV's orifice and closing time (the input layer converts size / Kv
+ *  with the same table and O1 reading), plus the optional timed hold-open. */
+export interface SavBC {
+    Cq:             number;   // fully open: Q = Cq·√(H − Z) [m^2.5/s]
+    closingTime:    number;   // full stroke, open → shut [s]; also the slow opening at high pressure
+    holdOpenUntil?: number;   // "Electrically Actuated SAV": once opened, held open until this time [s]
+}
+const SAV_OPEN_S = 1.0;   // full stroke, shut → open, on the down-surge [s] ("opens within 1 s")
+const SAV_HIGH_M = 7.0;   // opens slowly above the steady pump outlet pressure + 7 m (O5)
+
+/**
+ * Q20 low set pressure, gauge at node 0 (ruling 2026-10-29, O4), from the Unprotected run `u`.
+ * Static P_st = max(line-end tank level, highest line point) − z0 (row Q20: "whichever governs").
+ * First minimum after the pump stops: the first local minimum of p after the trip time, taken as the
+ * lowest p of that trough (until p next exceeds P_st), so a numerical ripple in the trough does not
+ * end it. Set = midway between that minimum and P_st; atmospheric or below (p ≤ 0) → P_st / 2.
+ */
+function SAV_LOW_SET(u: SimulationResults, tripTime: number, Hres: number): number {
+    const z0 = u.nodes[0].elevation;
+    const Pst = Math.max(Hres, ...u.nodes.map(n => n.elevation)) - z0;
+    const p = u.fullHistory.map(h => h.heads[0] - z0);
+    let i = u.fullHistory.findIndex(h => h.time > tripTime);
+    if (i < 0) throw new Error('SAV: the Unprotected run ends before the pump stops.');
+    while (i < p.length - 1 && !(p[i + 1] > p[i])) i++;
+    let pmin = p[i];
+    for (let j = i + 1; j < p.length && !(p[j] > Pst); j++) pmin = Math.min(pmin, p[j]);
+    return pmin > 0.0 ? 0.5 * (pmin + Pst) : 0.5 * Pst;
+}
+
+/**
+ * SAV opening s ∈ [0,1] this step from the gauge pressure p at its node on the previous step
+ * (ruling 2026-10-28 with the 2026-10-29 set pressures): p < low set → opens, full stroke in
+ * SAV_OPEN_S; p > high set → opens at the closing rate; in between → closes at the closing rate.
+ * `hold` (timed hold-open, latched by the low set): opens as on the down-surge and never closes.
+ * A previous-step relay, as a sensing pilot acts: outside the fast opening at most dt/closingTime
+ * of stroke per step, so no chatter at the thresholds.
+ */
+function SAV_OPENING(
+    sv: SavBC & { p_low: number; p_high: number }, s: number, p: number, dt: number, hold: boolean
+): number {
+    if (hold || p < sv.p_low) return Math.min(1.0, s + dt / SAV_OPEN_S);
+    if (p > sv.p_high)        return Math.min(1.0, s + dt / sv.closingTime);
+    return Math.max(0.0, s - dt / sv.closingTime);
+}
+
+/**
+ * BOX: CALC_BC_SAV — node 0 (pump outlet, after the check valve) with the SAV discharging (Q20).
+ *
+ * Called after SECTION 7c / 7g. Placed AT node 0 (O2: no spacing piece). The SAV discharges to
+ * atmosphere at the node elevation, outflow only, Q_s = Cq_s·√max(H − Z, 0), Cq_s = s·Cq. One C−
+ * face, the pump face Q_p(H) (non-increasing: 0 behind the shut check valve, the Q16 known inflow,
+ * or the running built-in curve) and the SAV. Liquid at the end of the step: the node's gas volume
+ * goes from V_g(prev) to V1 = min(V_g as the branch wrote it, the 1e-12 seed), and the water fills
+ * that difference within the step (volume continuity, as the measured node balance):
+ *   Q_p(H) = (H − Cm)/B2 + Q_s(H) + (V_g(prev) − V1)/dt
+ * The left side falls with H, the right rises — one root, by bisection (no Newton, DOMAIN §5/§8)
+ * on [Z, max(Z, Cm + B2·g)], g = Q_p(Z) − (V_g(prev) − V1)/dt. Writes nothing when the root is at
+ * or below Z (Q_s = 0 there, or a cavity too large to fill this step: the branch's own result
+ * stands). Writes H, the pump face, the pipe face (SIGNED: the column may flow back out through
+ * the SAV, DOMAIN §6) and V_g = V1 (H > Z > H_vap: liquid; free gas stays in C_gas, Bug #3).
+ */
+function CALC_BC_SAV(
+    idx:       number,
+    coefs:     CharCoefs,
+    prevState: SystemState,
+    newState:  SystemState,
+    newFlow:   FlowState,
+    dt:        number,
+    Cq_s:      number,
+    Q_p:       (H: number) => number
+): void {
+    const { Cm, B2 } = coefs;
+    const Z  = prevState.Z[idx];
+    const V1 = Math.min(newState.V_g[idx], 1e-12);
+    const fill = (prevState.V_g[idx] - V1) / dt;   // [m³/s] water that fills the gas volume
+    const f = (H: number): number =>
+        Q_p(H) - (H - Cm) / B2 - Cq_s * Math.sqrt(Math.max(H - Z, 0.0)) - fill;
+    if (!(f(Z) > 0.0)) return;
+    let lo = Z, hi = Math.max(Z, Cm + B2 * (Q_p(Z) - fill));   // f(lo) > 0 ≥ f(hi)
+    for (let k = 0; k < QPRV_BISECT_ITERS; k++) {
+        const mid = 0.5 * (lo + hi);
+        if (f(mid) > 0.0) lo = mid; else hi = mid;
+    }
+    const H = 0.5 * (lo + hi);
+    newState.H[idx]   = H;
+    newFlow.setQin(idx, Q_p(H));           // pump face (qPumpFace)
+    newFlow.setQout(idx, (H - Cm) / B2);   // pipe face, signed → qL[0][0]
+    newState.V_g[idx] = V1;
 }
 
 // ── PREPARE_valve — moved from runWaterHammerSimulationValve (Row 3.11 Unit A, S65) ──

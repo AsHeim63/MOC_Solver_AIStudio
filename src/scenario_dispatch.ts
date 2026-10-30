@@ -32,7 +32,7 @@ import {
     PipeSection, PumpParams, ReservoirParams,
     ValveParams, ClosureLaw, SimulationResults,
     GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
-    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC, QprvBC
+    PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC, QprvBC, SavBC
 } from './solver';
 import { fitPumpCurve, pumpCurveFitFault, PumpCurvePoint } from './pump_curve';
 
@@ -172,6 +172,9 @@ export interface DispatchInputs {
     /** Q19: QPRV at the end valve, 'gravity-valve' and 'pump-valve' only (transient run only);
      *  on 'pump-trip' dispatchSimulation throws. Absent = today's run, bit-identical. */
     qprv?: QprvInput;
+    /** Q20: SAV at the pump outlet, 'pump-trip' only (transient run only); on the valve scenarios
+     *  dispatchSimulation throws. Absent = today's run, bit-identical. */
+    sav?: SavInput;
 }
 
 /** Q19 ruling table (builder/inputs/Q19_surge_valves.md): nominal size [mm] →
@@ -190,20 +193,35 @@ export const KV_TO_CQ = 3600 * Math.sqrt(10);
 export interface QprvInput { size_mm: number; closingTime: number; Kv?: number;
                              runTime?: number }   // Q21 sizing study only: run length [s]; absent = 40·L/a
 
-/** Q19: the solver-facing QPRV; throws on a size not in the table, a closing time outside its
- *  range, or a Kv that is not finite and > 0. */
-export function toSolverQprv(q: QprvInput): QprvBC {
+/** Q20 SAV input: size, closing time and Kv as the QPRV (same table, same O1 reading);
+ *  holdOpenUntil [s, run time] = timed hold-open ("Electrically Actuated SAV"), absent = none. */
+export interface SavInput { size_mm: number; closingTime: number; Kv?: number; holdOpenUntil?: number }
+
+/** Q19/Q20: orifice and closing time of a surge valve; throws on a size not in the table, a
+ *  closing time outside its range, or a Kv that is not finite and > 0. */
+function surgeValveBC(name: 'QPRV' | 'SAV', q: { size_mm: number; closingTime: number; Kv?: number }):
+    { Cq: number; closingTime: number } {
     const row = SURGE_VALVE_TABLE[q.size_mm];
     if (row === undefined) {
-        throw new Error(`QPRV size ${q.size_mm} mm is not in the table (${Object.keys(SURGE_VALVE_TABLE).join(', ')} mm).`);
+        throw new Error(`${name} size ${q.size_mm} mm is not in the table (${Object.keys(SURGE_VALVE_TABLE).join(', ')} mm).`);
     }
     const [fastest, maximal, KvDefault] = row;
     if (!(q.closingTime >= fastest && q.closingTime <= maximal)) {
-        throw new Error(`QPRV ${q.size_mm} mm: closing time ${q.closingTime} s must lie in [${fastest}, ${maximal}] s.`);
+        throw new Error(`${name} ${q.size_mm} mm: closing time ${q.closingTime} s must lie in [${fastest}, ${maximal}] s.`);
     }
     const Kv = q.Kv ?? KvDefault;
-    if (!(Number.isFinite(Kv) && Kv > 0)) throw new Error(`QPRV ${q.size_mm} mm: Kv ${Kv} must be finite and > 0.`);
-    return { Cq: Kv / KV_TO_CQ, closingTime: q.closingTime, ...(q.runTime !== undefined && { runTime: q.runTime }) };
+    if (!(Number.isFinite(Kv) && Kv > 0)) throw new Error(`${name} ${q.size_mm} mm: Kv ${Kv} must be finite and > 0.`);
+    return { Cq: Kv / KV_TO_CQ, closingTime: q.closingTime };
+}
+
+/** Q19: the solver-facing QPRV (throws as surgeValveBC). */
+export function toSolverQprv(q: QprvInput): QprvBC {
+    return { ...surgeValveBC('QPRV', q), ...(q.runTime !== undefined && { runTime: q.runTime }) };
+}
+
+/** Q20: the solver-facing SAV (throws as surgeValveBC). */
+export function toSolverSav(s: SavInput): SavBC {
+    return { ...surgeValveBC('SAV', s), ...(s.holdOpenUntil !== undefined && { holdOpenUntil: s.holdOpenUntil }) };
 }
 
 /** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only
@@ -398,6 +416,11 @@ export function buildScenarioArgs(scenario: Scenario, inputs: DispatchInputs): S
     }
 }
 
+/** Q20: the SAV is for the pump trip only; refused on the valve scenarios, never silently dropped. */
+function refuseSav(inputs: DispatchInputs, scenario: Scenario): void {
+    if (inputs.sav !== undefined) throw new Error(`SAV is for the pump-trip scenario only, not '${scenario}'.`);
+}
+
 /**
  * Route the selected scenario to its solver entry point. Pure dispatch: builds solver-facing
  * params and CALLS the matching entry point — nothing else. `trace`, when provided, receives
@@ -420,14 +443,17 @@ export function dispatchSimulation(
                 throw new Error(`QPRV is for valve-closure scenarios only ('gravity-valve', 'pump-valve'), not '${scenario}'.`);
             }
             trace?.(runWaterHammerSimulation.name);   // label from the actual reference (audit S58 F7)
-            return runWaterHammerSimulation(a.pipes, a.pump, a.reservoir, trace, inputs.airValves);
+            return runWaterHammerSimulation(a.pipes, a.pump, a.reservoir, trace, inputs.airValves,
+                inputs.sav && toSolverSav(inputs.sav));   // Q20
         }
         case 'pump-valve': {
+            refuseSav(inputs, scenario);
             trace?.(runWaterHammerSimulationValve.name);
             return runWaterHammerSimulationValve(a.pipes, a.pump, a.valve, trace, inputs.airValves,
                 inputs.qprv && toSolverQprv(inputs.qprv));   // Q19
         }
         case 'gravity-valve': {
+            refuseSav(inputs, scenario);
             trace?.(runWaterHammerSimulationGravityValve.name);
             return runWaterHammerSimulationGravityValve(a.pipes, a.upstream, a.valve, trace, inputs.airValves,
                 inputs.qprv && toSolverQprv(inputs.qprv));   // Q19
