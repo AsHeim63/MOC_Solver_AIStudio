@@ -118,7 +118,7 @@ export function PartsList({ set, u }: { set: SolutionSet; u: U }) {
             <td className={td}>{fmt('length', u.length, d.x, 0)}</td><td className={td}>{mm(d.size_mm)}</td>
             <td className={td}>—</td><td className={td}>—</td><td className={td}>{fmt('valve', u.valve, d.Kv)}</td>
             <td className={td}>{d.sets.map(([k, p]) => `${k} ${fmt('pressure', u.pressure, p)}`).join(' / ') || '—'}</td>
-            <td className={td}>{d.closingTime}</td>
+            <td className={td}>{Math.round(d.closingTime * 10) / 10}</td>
           </tr>
         ))}
       </tbody>
@@ -255,7 +255,7 @@ export function Report({ pipes, scenario, scenarioName, scenarioData, unprotecte
             {avStudy && <li>Air-valve targets: {fmt('pressure', u.pressure, MIN_GAUGE_HEAD_M)} {u.pressure} at a valve, {fmt('pressure', u.pressure, ADD_VALVE_HEAD_M)} {u.pressure} on the line (gauge).</li>}
             {avStudy && avStudy.unresolved.length > 0 &&
               <li>Target not met at x = {avStudy.unresolved.map(x => fmt('length', u.length, x, 0)).join(', ')} {u.length}.</li>}
-            {qpStudy && !qpStudy.tried.some(t => t.returns) && <li>QPRV: no table size holds the head at the closing pressure.</li>}
+            {qpStudy?.notes.map(n => <li key={n}>{n}.</li>)}
           </ul>
         </section>
       </div>

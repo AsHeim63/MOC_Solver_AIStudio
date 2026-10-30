@@ -49,7 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
-import { sizeQprv, QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
+import { QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report, SetView, solutionSets } from './report';   // Q24, Q23
@@ -235,9 +235,16 @@ export default function App() {
   const pkgWrite = (key: string, on: boolean) => { try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* storage blocked */ } };
   const [qprvApproved, setQprvApproved] = useState<boolean>(() => pkgRead('hg_pkg_qprv'));
   const [savApproved, setSavApproved] = useState<boolean>(() => pkgRead('hg_pkg_sav'));
-  const approveQprv = (on: boolean) => { setQprvApproved(on); pkgWrite('hg_pkg_qprv', on); if (!on) setQpStudy(null); };
+  const approveQprv = (on: boolean) => { setQprvApproved(on); pkgWrite('hg_pkg_qprv', on); if (!on) { stopQprvStudy(); setQpStudy(null); } };
   const approveSav = (on: boolean) => { setSavApproved(on); pkgWrite('hg_pkg_sav', on); if (!on) setSvStudy(null); };
   const [isSimulating, setIsSimulating] = useState(false);
+  // Q29: the QPRV study runs in a Worker (qprv_worker.ts) so the screen does not freeze; stopped when its
+  // inputs are dropped, so a stale study never lands.
+  const qprvWorker = React.useRef<Worker | null>(null);
+  const stopQprvStudy = () => {
+    if (!qprvWorker.current) return;
+    qprvWorker.current.terminate(); qprvWorker.current = null; setIsSimulating(false);
+  };
 
     // ── Scenario control (Row 3.11 Unit C, D-7 — ruling R1) ───────────────────
   // The control's state is the two-way radio plus the valve source; `scenario` is DERIVED from it
@@ -597,6 +604,7 @@ export default function App() {
     setValveExponent(p.valve.exponent); setValveCheckValve(p.valve.checkValve);
     setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
     // Results on screen belong to the old inputs.
+    stopQprvStudy();
     setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setSvStudy(null); setReportKey(null); setSimError(null);
     setGateReport(null); setGateProfile(null); setGateCrash(null); setView('input');
   };
@@ -667,21 +675,23 @@ export default function App() {
     }, 100);
   };
 
-  // Q21: QPRV size and closing time searched after the Unprotected run (background, as the air valves).
+  // Q21/Q29: QPRV size and closing time found after the Unprotected run, in a Worker (no screen freeze).
   const handleSizeQprv = () => {
+    stopQprvStudy();
     setIsSimulating(true);
-    setTimeout(() => {
-      try {
-        dropReportIfInputsChanged();
-        setQpStudy(sizeQprv(scenario, buildDispatchInputs()));
-        setSimError(null);
-      } catch (error) {
-        console.error("QPRV sizing failed", error);
-        setSimError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setIsSimulating(false);
-      }
-    }, 100);
+    dropReportIfInputsChanged();
+    const w = new Worker(new URL('./qprv_worker.ts', import.meta.url), { type: 'module' });
+    qprvWorker.current = w;
+    const done = (study: QprvStudy | null, error?: string) => {
+      if (qprvWorker.current !== w) return;
+      w.terminate(); qprvWorker.current = null;
+      if (study) { setQpStudy(study); setSimError(null); }
+      else { console.error("QPRV sizing failed", error); setSimError(error ?? 'QPRV sizing failed'); }
+      setIsSimulating(false);
+    };
+    w.onmessage = (e: MessageEvent<{ study?: QprvStudy; error?: string }>) => done(e.data.study ?? null, e.data.error);
+    w.onerror = (e: ErrorEvent) => done(null, e.message);
+    w.postMessage({ scenario, inputs: buildDispatchInputs() });
   };
 
   // Q22: SAV size, closing time and hold-open searched from the system with the air valves placed
@@ -1601,11 +1611,10 @@ export default function App() {
                     </div>
                     {qpStudy && (
                       <p className="mt-4 text-xs text-slate-700">
-                        Size {inUnit(qpStudy.qprv.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, qpStudy.qprv.Kv)}, closing time {qpStudy.qprv.closingTime} s,
+                        Size {inUnit(qpStudy.qprv.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, qpStudy.qprv.Kv)}, closing time {Math.round(qpStudy.qprv.closingTime * 10) / 10} s,
                         max head {fmt('length', uu.length, qpStudy.maxHead)} {uu.length} (Unprotected {fmt('length', uu.length, peakAll(qpStudy.stage1))} {uu.length});
                         {' '}{qpStudy.tried.length} runs.
-                        {!qpStudy.tried.some(t => t.returns) &&
-                          <span className="text-amber-700"> No table size holds the head at the closing pressure.</span>}
+                        {qpStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}.</span>)}
                       </p>
                     )}
                   </section>

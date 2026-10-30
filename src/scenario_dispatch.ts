@@ -191,7 +191,9 @@ export const KV_TO_CQ = 3600 * Math.sqrt(10);
 /** Q19 QPRV input: size from the table, closing time within that size's [fastest, maximal];
  *  Kv [m³/h at 1 bar] absent = the table's default for the size. */
 export interface QprvInput { size_mm: number; closingTime: number; Kv?: number;
-                             runTime?: number }   // Q21 sizing study only: run length [s]; absent = 40·L/a
+                             runTime?: number;          // Q21 sizing study only: run length [s]; absent = 40·L/a
+                             steppedClosure?: boolean } // Q29: closing time may exceed the size's maximal
+                                                        // ("Stepped Closure Add-on Required", §3)
 
 /** Q20 SAV input: size, closing time and Kv as the QPRV (same table, same O1 reading);
  *  holdOpenUntil [s, run time] = timed hold-open ("Electrically Actuated SAV"), absent = none. */
@@ -199,15 +201,16 @@ export interface SavInput { size_mm: number; closingTime: number; Kv?: number; h
                             runTime?: number }   // Q22 sizing study only: run length [s]; absent = 40·L/a
 
 /** Q19/Q20: orifice and closing time of a surge valve; throws on a size not in the table, a
- *  closing time outside its range, or a Kv that is not finite and > 0. */
-function surgeValveBC(name: 'QPRV' | 'SAV', q: { size_mm: number; closingTime: number; Kv?: number }):
+ *  closing time outside its range (above the maximal allowed with a QPRV's steppedClosure, Q29),
+ *  or a Kv that is not finite and > 0. */
+function surgeValveBC(name: 'QPRV' | 'SAV', q: { size_mm: number; closingTime: number; Kv?: number; steppedClosure?: boolean }):
     { Cq: number; closingTime: number } {
     const row = SURGE_VALVE_TABLE[q.size_mm];
     if (row === undefined) {
         throw new Error(`${name} size ${q.size_mm} mm is not in the table (${Object.keys(SURGE_VALVE_TABLE).join(', ')} mm).`);
     }
     const [fastest, maximal, KvDefault] = row;
-    if (!(q.closingTime >= fastest && q.closingTime <= maximal)) {
+    if (!(q.closingTime >= fastest && (q.closingTime <= maximal || q.steppedClosure === true))) {
         throw new Error(`${name} ${q.size_mm} mm: closing time ${q.closingTime} s must lie in [${fastest}, ${maximal}] s.`);
     }
     const Kv = q.Kv ?? KvDefault;
