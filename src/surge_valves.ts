@@ -7,8 +7,8 @@
 // the shortest closing time → the smallest size (row Q21: "smallest size that meets it wins a tie").
 // The run with the chosen QPRV is stage 2. Both runs are kept, as in air_valves.ts.
 
-import { SimulationResults } from './solver';
-import { dispatchSimulation, DispatchInputs, Scenario, SURGE_VALVE_TABLE } from './scenario_dispatch';
+import { SimulationResults, SAV_STATIC_FIRST_MIN, SAV_LOW_FROM, SAV_HIGH_M } from './solver';
+import { dispatchSimulation, DispatchInputs, Scenario, SURGE_VALVE_TABLE, SavInput } from './scenario_dispatch';
 
 /** One candidate run (Kv = the table default of its size). */
 export interface QprvTrial {
@@ -155,4 +155,162 @@ export function sizeQprv(scenario: Scenario, inputs: DispatchInputs): QprvStudy 
     const stage2 = run(chosen.size_mm, chosen.closingTime, chosen.Kv);   // default length
     return { stage1, stage2, qprv: { size_mm: chosen.size_mm, Kv: chosen.Kv, closingTime: chosen.closingTime },
              maxHead: chosen.maxHead, tried };
+}
+
+// ── Q22: SAV size, closing time and hold-open found automatically ─────────────────────────────────────
+//
+// builder/inputs/Q19_surge_valves.md, 2026-10-29 sections 1 and 4, for the Q20 SAV (pump trip). Every
+// run carries the air valves already placed (ANSWERS 2026-10-29 standing rule); the low set pressure
+// comes from the Unprotected run (no devices, as the solver's own SAV_LOW_SET), the highest-surge time
+// from the run with the air valves (ruling 2026-10-29). Gauge pressure p at node 0 (SAV + air valve, O2).
+
+export const SAV_NOTE_EAS = 'Electrically Actuated SAV';
+const SAV_HOLD_LEAD_S = 10;   // §4.4: hold open from the pump stop to (time of the highest surge − 10 s)
+
+/** O4 low set and O5 high set, gauge [m]: low = midway (first minimum, static), or static / 2 when the
+ *  minimum is atmospheric or below; high = pump working pressure + 7 m. */
+export function savSetPressures(pStatic: number, firstMin: number, pWork: number): { low: number; high: number } {
+    return { low: SAV_LOW_FROM(firstMin, pStatic), high: pWork + SAV_HIGH_M };
+}
+
+/** §1: d = √(Q·9e5/√P) [mm], Q [m³/s], P [m]; the smallest table size ≥ d (above the table: the largest). */
+export function surgeValveFirstSize(Q: number, P: number): { d: number; size_mm: number } {
+    if (!(Q > 0 && P > 0)) throw new Error(`Surge valve first size: Q (${Q}) and P (${P}) must be > 0.`);
+    const d = Math.sqrt((Q * 9e5) / Math.sqrt(P));
+    return { d, size_mm: SIZES.find(s => s >= d) ?? SIZES[SIZES.length - 1] };
+}
+
+/** §4.7: first closing time t = 0.0005·d² + 0.38·d [s], d = nominal size [mm]. */
+export const savFirstClosingTime = (d_mm: number): number => 0.0005 * d_mm * d_mm + 0.38 * d_mm;
+
+/** §4.8: t0 after k 10 % steps of t0 (k < 0 shortens), plus another 20 % of t0 when `margin`;
+ *  kept to 0.1 s (worked example e allows rounding). */
+export const savClosingTime = (t0: number, k: number, margin: boolean): number =>
+    Math.round(t0 * (1 + 0.1 * k + (margin ? 0.2 : 0)) * 10) / 10;
+
+/** One candidate run (Kv = the table default of its size). */
+export interface SavTrial {
+    size_mm:        number;
+    closingTime:    number;    // [s]
+    Kv:             number;
+    holdOpenUntil?: number;    // [s] "Electrically Actuated SAV"
+    rises:          boolean;   // p rose above static after max(pump stop, hold end) (§4.5/6)
+    maxHead:        number;    // max head over the line in that run [m]
+}
+
+export interface SavStudy {
+    stage1:       SimulationResults;   // run with the air valves placed, no SAV, default length
+    stage2:       SimulationResults;   // run with the chosen SAV (same air valves), sav.runTime long
+    sav:          Required<Pick<SavInput, 'size_mm' | 'Kv' | 'closingTime' | 'runTime'>> & { holdOpenUntil?: number };
+    lowSet:       number;              // gauge at the SAV node [m] (from the Unprotected run)
+    highSet:      number;
+    firstSize_mm: number;              // §1 first size from lowSet and the steady flow
+    runTime:      number;              // §4.1: stage1 run time + chosen closing time [s]
+    notes:        string[];            // "Electrically Actuated SAV" iff holdOpenUntil is set
+    maxHead:      number;              // max head over the line in stage 2 [m]
+    tried:        SavTrial[];          // every candidate run, chosen included
+}
+
+export function sizeSav(scenario: Scenario, inputs: DispatchInputs): SavStudy {
+    if (scenario !== 'pump-trip') throw new Error(`SAV sizing is for the pump-trip scenario only, not '${scenario}'.`);
+    const base: DispatchInputs = { ...inputs, sav: undefined };
+    const stage1 = dispatchSimulation(scenario, base);
+    const unprot = dispatchSimulation(scenario, { ...base, airValves: undefined });
+    const trip = inputs.pump.tripTime, z0 = stage1.nodes[0].elevation;
+    const { Pst, pmin } = SAV_STATIC_FIRST_MIN(unprot, trip, inputs.reservoir.head);
+    const { low: lowSet, high: highSet } = savSetPressures(Pst, pmin, stage1.nodes[0].steadyHead - z0);
+    const firstSize_mm = surgeValveFirstSize(inputs.pump.initialFlow, lowSet).size_mm;
+
+    const H1 = stage1.fullHistory, T1 = H1[H1.length - 1].time;
+    let tMax = 0, hMax = -Infinity;   // §4.3: time of the highest head over the line, air-valve run
+    for (const e of H1) { const m = maxOf(e.heads); if (m > hMax) { hMax = m; tMax = e.time; } }
+    const holdEnd = tMax - SAV_HOLD_LEAD_S;
+
+    /** First up-crossing of P_st by p after `from` (p below P_st first); −1 if none. */
+    const risesAt = (r: SimulationResults, from: number): number => {
+        let below = false;
+        for (const e of r.fullHistory) {
+            if (e.time <= from) continue;
+            const p = e.heads[0] - z0;
+            if (p < Pst) below = true; else if (below && p > Pst) return e.time;
+        }
+        return -1;
+    };
+    /** §4.8: p falls below the low set again after first recovering from the first drop below it. */
+    const refalls = (r: SimulationResults): boolean => {
+        const p = r.fullHistory.map(e => e.heads[0] - z0);
+        let i = r.fullHistory.findIndex((e, j) => e.time > trip && p[j] < lowSet);
+        if (i < 0) return false;
+        while (i < p.length && p[i] < lowSet) i++;
+        for (; i < p.length; i++) if (p[i] < lowSet) return true;
+        return false;
+    };
+
+    const tried: SavTrial[] = [];
+    type Run = { t: SavTrial; firstRise: number; refall: boolean };
+    type SavSel = SavStudy['sav'];
+    const run = (s: SavSel) => dispatchSimulation(scenario, { ...base, sav: s });
+    const sel = (size_mm: number, closingTime: number, holdOpenUntil?: number): SavSel =>
+        ({ size_mm, Kv: SURGE_VALVE_TABLE[size_mm][2], closingTime, runTime: T1 + closingTime,
+           ...(holdOpenUntil !== undefined && { holdOpenUntil }) });
+    const trial = (size_mm: number, closingTime: number, holdOpenUntil?: number): Run => {
+        const s = sel(size_mm, closingTime, holdOpenUntil), r = run(s);   // r not kept (memory)
+        const t: SavTrial = { size_mm, closingTime, Kv: s.Kv, ...(holdOpenUntil !== undefined && { holdOpenUntil }),
+                              rises: risesAt(r, Math.max(trip, holdOpenUntil ?? -Infinity)) > 0, maxHead: peakAll(r) };
+        tried.push(t);
+        return { t, firstRise: risesAt(r, trip), refall: refalls(r) };
+    };
+    const inRange = (size: number, t: number) => Math.min(SURGE_VALVE_TABLE[size][1], Math.max(SURGE_VALVE_TABLE[size][0], t));
+
+    // §4.3-4.6 per size, first closing time: the pressure rises above static inside (pump stop,
+    // t_max − 10 s) → held open to t_max − 10 s ("Electrically Actuated SAV"), run again.
+    const bySize = new Map<number, Run>();
+    const atSize = (size: number): Run => {
+        const seen = bySize.get(size);
+        if (seen) return seen;
+        const ct = inRange(size, savClosingTime(savFirstClosingTime(size), 0, false));
+        let r = trial(size, ct);
+        if (r.firstRise > trip && r.firstRise < holdEnd) r = trial(size, ct, holdEnd);
+        bySize.set(size, r);
+        return r;
+    };
+    // §4.5: the first size does not rise → smaller sizes until one rises. §4.6: it rises → larger sizes
+    // while they still rise; the lowest max head wins (the smaller size on a tie).
+    let i = SIZES.indexOf(firstSize_mm), best = atSize(SIZES[i]);
+    if (!best.t.rises) {
+        while (i > 0 && !best.t.rises) best = atSize(SIZES[--i]);
+        // Builder decision (LOOK-AT): no size rises above static → the lowest max head tried.
+        if (!best.t.rises) best = [...bySize.values()].reduce((b, r) => (r.t.maxHead < b.t.maxHead ? r : b));
+    } else {
+        for (let j = i + 1; j < SIZES.length; j++) {
+            const r = atSize(SIZES[j]);
+            if (!r.t.rises) break;
+            if (r.t.maxHead < best.t.maxHead) best = r;
+        }
+    }
+
+    // §4.8 closing time of the chosen size (its hold kept): falls below the low set again → lengthen in
+    // 10 % steps of t0 until it does not, then another 20 %; else shorten in 10 % steps while it neither
+    // falls again nor stops rising, not below 1.5 · fastest. Capped at the size's maximal time (builder).
+    const size = best.t.size_mm, hold = best.t.holdOpenUntil, t0 = savFirstClosingTime(size);
+    const [fastest, maximal] = SURGE_VALVE_TABLE[size];
+    let chosen = best;
+    if (best.refall) {
+        let k = 0, cur = best;
+        while (cur.refall && cur.t.closingTime < maximal) cur = trial(size, inRange(size, savClosingTime(t0, ++k, false)), hold);
+        chosen = cur.refall ? cur : trial(size, inRange(size, savClosingTime(t0, k, true)), hold);
+    } else {
+        for (let k = -1; ; k--) {
+            const ct = savClosingTime(t0, k, false);
+            if (ct < 1.5 * fastest) break;
+            const r = trial(size, ct, hold);
+            if (r.refall || !r.t.rises) break;
+            chosen = r;
+        }
+    }
+
+    const sav = sel(size, chosen.t.closingTime, hold);
+    const stage2 = run(sav);
+    return { stage1, stage2, sav, lowSet, highSet, firstSize_mm, runTime: sav.runTime,
+             notes: hold !== undefined ? [SAV_NOTE_EAS] : [], maxHead: peakAll(stage2), tried };
 }

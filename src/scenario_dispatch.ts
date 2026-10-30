@@ -195,7 +195,8 @@ export interface QprvInput { size_mm: number; closingTime: number; Kv?: number;
 
 /** Q20 SAV input: size, closing time and Kv as the QPRV (same table, same O1 reading);
  *  holdOpenUntil [s, run time] = timed hold-open ("Electrically Actuated SAV"), absent = none. */
-export interface SavInput { size_mm: number; closingTime: number; Kv?: number; holdOpenUntil?: number }
+export interface SavInput { size_mm: number; closingTime: number; Kv?: number; holdOpenUntil?: number;
+                            runTime?: number }   // Q22 sizing study only: run length [s]; absent = 40·L/a
 
 /** Q19/Q20: orifice and closing time of a surge valve; throws on a size not in the table, a
  *  closing time outside its range, or a Kv that is not finite and > 0. */
@@ -221,7 +222,8 @@ export function toSolverQprv(q: QprvInput): QprvBC {
 
 /** Q20: the solver-facing SAV (throws as surgeValveBC). */
 export function toSolverSav(s: SavInput): SavBC {
-    return { ...surgeValveBC('SAV', s), ...(s.holdOpenUntil !== undefined && { holdOpenUntil: s.holdOpenUntil }) };
+    return { ...surgeValveBC('SAV', s), ...(s.holdOpenUntil !== undefined && { holdOpenUntil: s.holdOpenUntil }),
+             ...(s.runTime !== undefined && { runTime: s.runTime }) };
 }
 
 /** Q10: the solver-facing curve, H_suct = suction pressure + pump elevation (ruling Q6-a). Only

@@ -2255,7 +2255,11 @@ function runCore(
         throw new Error(`QPRV: run time (${qp.runTime} s) must be finite, ≥ 40·L/a (${40.0 * travelTime} s) ` +
                         `and < the pump trip time (${pump.tripTime} s).`);
     }
-    const maxTime           = qp?.runTime ?? 40.0 * travelTime;
+    // Q22: the SAV sizing study likewise (pump trip; ≥ 40·L/a, so the default run is its first part).
+    if (sv?.runTime !== undefined && !(Number.isFinite(sv.runTime) && sv.runTime >= 40.0 * travelTime)) {
+        throw new Error(`SAV: run time (${sv.runTime} s) must be finite and ≥ 40·L/a (${40.0 * travelTime} s).`);
+    }
+    const maxTime           = qp?.runTime ?? sv?.runTime ?? 40.0 * travelTime;
     const maxSteps          = Math.ceil(maxTime / baseDt);
     const steadyPressureHead = pumpHead - pump.elevation;
     const exitThreshold     = 0.1 * steadyPressureHead;
@@ -3181,9 +3185,10 @@ export interface SavBC {
     Cq:             number;   // fully open: Q = Cq·√(H − Z) [m^2.5/s]
     closingTime:    number;   // full stroke, open → shut [s]; also the slow opening at high pressure
     holdOpenUntil?: number;   // "Electrically Actuated SAV": once opened, held open until this time [s]
+    runTime?:       number;   // Q22 sizing study only: run length [s] instead of 40·L/a; absent = today's run
 }
 const SAV_OPEN_S = 1.0;   // full stroke, shut → open, on the down-surge [s] ("opens within 1 s")
-const SAV_HIGH_M = 7.0;   // opens slowly above the steady pump outlet pressure + 7 m (O5)
+export const SAV_HIGH_M = 7.0;   // opens slowly above the steady pump outlet pressure + 7 m (O5)
 
 /**
  * Q20 low set pressure, gauge at node 0 (ruling 2026-10-29, O4), from the Unprotected run `u`.
@@ -3193,6 +3198,12 @@ const SAV_HIGH_M = 7.0;   // opens slowly above the steady pump outlet pressure 
  * end it. Set = midway between that minimum and P_st; atmospheric or below (p ≤ 0) → P_st / 2.
  */
 function SAV_LOW_SET(u: SimulationResults, tripTime: number, Hres: number): number {
+    const { Pst, pmin } = SAV_STATIC_FIRST_MIN(u, tripTime, Hres);
+    return SAV_LOW_FROM(pmin, Pst);
+}
+
+/** Q22 (exported for the sizing study): P_st and the first minimum of SAV_LOW_SET, gauge at node 0 [m]. */
+export function SAV_STATIC_FIRST_MIN(u: SimulationResults, tripTime: number, Hres: number): { Pst: number; pmin: number } {
     const z0 = u.nodes[0].elevation;
     const Pst = Math.max(Hres, ...u.nodes.map(n => n.elevation)) - z0;
     const p = u.fullHistory.map(h => h.heads[0] - z0);
@@ -3201,8 +3212,11 @@ function SAV_LOW_SET(u: SimulationResults, tripTime: number, Hres: number): numb
     while (i < p.length - 1 && !(p[i + 1] > p[i])) i++;
     let pmin = p[i];
     for (let j = i + 1; j < p.length && !(p[j] > Pst); j++) pmin = Math.min(pmin, p[j]);
-    return pmin > 0.0 ? 0.5 * (pmin + Pst) : 0.5 * Pst;
+    return { Pst, pmin };
 }
+
+/** O4: midway between the first minimum and P_st; atmospheric or below (p ≤ 0) → P_st / 2. */
+export const SAV_LOW_FROM = (pmin: number, Pst: number): number => (pmin > 0.0 ? 0.5 * (pmin + Pst) : 0.5 * Pst);
 
 /**
  * SAV opening s ∈ [0,1] this step from the gauge pressure p at its node on the previous step

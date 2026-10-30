@@ -49,7 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
-import { sizeQprv, QprvStudy, peakAll } from './surge_valves';
+import { sizeQprv, QprvStudy, peakAll, sizeSav, SavStudy } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report } from './report';   // Q24
@@ -213,6 +213,8 @@ export default function App() {
   const [avStudy, setAvStudy] = useState<AirValveStudy | null>(null);
   // Q21: QPRV sizing study (valve-closure scenarios); null until "Size QPRV".
   const [qpStudy, setQpStudy] = useState<QprvStudy | null>(null);
+  // Q22: SAV sizing study (pump trip, with the placed air valves); null until "Size SAV".
+  const [svStudy, setSvStudy] = useState<SavStudy | null>(null);
   const [showReport, setShowReport] = useState(false);   // Q24: engineering report page
   // Q24: the inputs of the run on screen; the report is offered only while the inputs still match them.
   const [reportKey, setReportKey] = useState<string | null>(null);
@@ -623,6 +625,7 @@ export default function App() {
         setReportKey(runKey());
         setAvStudy(null);
         setQpStudy(null);
+        setSvStudy(null);
         setSimError(null);
         setSelectedNodeIdx(0);
       } catch (error) {
@@ -664,6 +667,24 @@ export default function App() {
         setSimError(null);
       } catch (error) {
         console.error("QPRV sizing failed", error);
+        setSimError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 100);
+  };
+
+  // Q22: SAV size, closing time and hold-open searched from the system with the air valves placed
+  // (ANSWERS 2026-10-29); background, as the QPRV.
+  const handleSizeSav = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      try {
+        dropReportIfInputsChanged();
+        setSvStudy(sizeSav(scenario, { ...buildDispatchInputs(), airValves: avStudy?.valves ?? [] }));
+        setSimError(null);
+      } catch (error) {
+        console.error("SAV sizing failed", error);
         setSimError(error instanceof Error ? error.message : String(error));
       } finally {
         setIsSimulating(false);
@@ -1560,6 +1581,28 @@ export default function App() {
                         {' '}{qpStudy.tried.length} runs.
                         {!qpStudy.tried.some(t => t.returns) &&
                           <span className="text-amber-700"> No table size holds the head at the closing pressure.</span>}
+                      </p>
+                    )}
+                  </section>
+                  )}
+
+                  {/* Q22: SAV sizing (pump trip) */}
+                  {scenario === 'pump-trip' && (
+                  <section data-q22="sav" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <h3 className="text-lg font-bold mr-auto">SAV</h3>
+                      <button onClick={handleSizeSav} disabled={isSimulating}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                        Size SAV
+                      </button>
+                    </div>
+                    {svStudy && (
+                      <p className="mt-4 text-xs text-slate-700">
+                        Size {inUnit(svStudy.sav.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, svStudy.sav.Kv)}, closing time {svStudy.sav.closingTime} s,
+                        low / high set {fmt('pressure', uu.pressure, svStudy.lowSet)} / {fmt('pressure', uu.pressure, svStudy.highSet)} {uu.pressure},
+                        max head {fmt('length', uu.length, svStudy.maxHead)} {uu.length} (without SAV {fmt('length', uu.length, peakAll(svStudy.stage1))} {uu.length});
+                        {' '}{svStudy.tried.length} runs.
+                        {svStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}{svStudy.sav.holdOpenUntil !== undefined && ` (held open until ${svStudy.sav.holdOpenUntil.toFixed(1)} s)`}.</span>)}
                       </p>
                     )}
                   </section>
