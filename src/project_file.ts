@@ -20,7 +20,8 @@ export interface ProjectInputs {
            type?: ValveType; a?: number; b?: number; rho?: number };
   pumpCurve: { Q: string; H: string }[];
   suctionPressure: string;   // as typed (m), like the curve cells
-  preferences: { airValves: boolean };
+  // Q45: qprv / sav optional — files saved before Q45 open with the QPRV/SAV ticks kept as before Open.
+  preferences: { airValves: boolean; qprv?: boolean; sav?: boolean };
 }
 
 export const projectText = (p: ProjectInputs): string =>
@@ -64,7 +65,8 @@ export function parseProject(text: string): ProjectInputs | string {
     ['a', 'b', 'rho'].every(k => valve[k] === undefined || num(valve[k])) &&
     Array.isArray(pumpCurve) && pumpCurve.every(r => obj(r) && typeof r.Q === 'string' && typeof r.H === 'string') &&
     typeof j.suctionPressure === 'string' &&
-    obj(preferences) && typeof preferences.airValves === 'boolean';
+    obj(preferences) && typeof preferences.airValves === 'boolean' &&
+    ['qprv', 'sav'].every(k => preferences[k] === undefined || typeof preferences[k] === 'boolean');
   if (!ok) return NOT_PROJECT;
   const p = j as unknown as ProjectInputs;
   // Rebuilt from the known fields only: no extra keys from the file reach the app state.
@@ -73,6 +75,7 @@ export function parseProject(text: string): ProjectInputs | string {
     pipes: p.pipes.map(q => pick(q, ['id', ...PIPE_NUMS]) as unknown as PipeSection),
     pump: pick(p.pump, PUMP_NUMS) as unknown as PumpParams,
     sourceElevation: p.sourceElevation, outletPressure: p.outletPressure, inletPressure: p.inletPressure,
-    valve: p.valve, pumpCurve: p.pumpCurve, suctionPressure: p.suctionPressure, preferences: p.preferences,
+    valve: p.valve, pumpCurve: p.pumpCurve, suctionPressure: p.suctionPressure,
+    preferences: pick(p.preferences, ['airValves', 'qprv', 'sav'].filter(k => k in p.preferences)) as ProjectInputs['preferences'],
   };
 }

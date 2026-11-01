@@ -601,7 +601,7 @@ export default function App() {
     const text = projectText({ operation, valveSource, pipes, pump, sourceElevation, outletPressure, inletPressure,
       valve: { kv0: valveKv0, t0: valveT0, tClose: valveTClose, exponent: valveExponent, checkValve: valveCheckValve,
                type: valveType, ...valveTypeParams },
-      pumpCurve: curveRows, suctionPressure: suctionText, preferences: { airValves: avApproved } });
+      pumpCurve: curveRows, suctionPressure: suctionText, preferences: { airValves: avApproved, qprv: qprvApproved, sav: savApproved } });
     const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
     const a = document.createElement('a');
     a.href = url; a.download = 'hydroguard-project.json'; a.click();
@@ -624,6 +624,10 @@ export default function App() {
     setValveTypeParams({ a: p.valve.a ?? VALVE_TYPE_PARAMS.a, b: p.valve.b ?? VALVE_TYPE_PARAMS.b,
                          rho: p.valve.rho ?? VALVE_TYPE_PARAMS.rho });
     setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
+    // Q45: files saved before Q45 have no QPRV/SAV choice: the ticks stay as they were before Open.
+    // Only a changed tick is applied, so an unchanged default (no stored key = ticked) leaves storage as it was.
+    if (p.preferences.qprv !== undefined && p.preferences.qprv !== qprvApproved) approveQprv(p.preferences.qprv);
+    if (p.preferences.sav !== undefined && p.preferences.sav !== savApproved) approveSav(p.preferences.sav);
     // Results on screen belong to the old inputs.
     stopQprvStudy();
     setIsAnimating(false); setResults(null); setAvStudy(null); setQpStudy(null); setSvStudy(null); setReportKey(null); setSimError(null);
