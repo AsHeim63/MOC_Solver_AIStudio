@@ -5,13 +5,15 @@
 // valve) where stage 1 is below −1 m (gauge). Each inlet is the smallest orifice from the set that
 // keeps ITS OWN node at or above −1 m (Q16 final ruling 2026-10-22 (2)). Line pressures below −2 m
 // are ignored unless a node reaches −8 m or lower; then a valve is added at the lowest such point at
-// least 150 m from every valve, all are sized again, and this repeats (ruling (4)). Every valve is computed
+// least 150 m from every valve, all are sized again, and this repeats (ruling (4)). Q31: the −8 m test and
+// its lowest point read the pressure held for at least 0.2 s (hold_filter.ts); the −1 m valve test reads the run. Every valve is computed
 // with a 12 mm outlet; it is shown as Non-Slam only when its air pocket grows beyond π·D², else as
 // a regular air valve (ruling 2). The final protected run is stage 2. Both runs are kept.
 // The air-valve boundary itself is the solver's CALC_AIR_VALVE_N (solver.ts SECTION 7g).
 
 import { SimulationResults, PipeSection, AirValveBC } from './solver';
 import { dispatchSimulation, DispatchInputs, Scenario } from './scenario_dispatch';
+import { holdFilter } from './hold_filter';
 
 export const AIR_VALVE_SIZES_MM: readonly number[] = [25, 50, 75, 100, 150, 200, 250, 300, 350, 400, 500];
 export const NON_SLAM_OUTLET_MM = 12;
@@ -52,9 +54,10 @@ const valveLow = (r: SimulationResults, i: number): boolean => minGauge(r, i) < 
 /** Valves whose own node is below −1 m. */
 const valveMisses = (r: SimulationResults, vs: Placed[]): Placed[] => vs.filter(v => valveLow(r, v.node));
 
-/** Nodes missing the Q16 target: a valve node below −1 m, any other node at −8 m or lower. */
-const misses = (r: SimulationResults, valveNodes: ReadonlySet<number>): number[] =>
-    r.nodes.map((_, i) => i).filter(i => (valveNodes.has(i) ? valveLow(r, i) : minGauge(r, i) <= ADD_VALVE_HEAD_M));
+/** Nodes missing the Q16 target: a valve node below −1 m, any other node at −8 m or lower for at least
+ *  0.2 s (Q31; held = holdFilter(r)). */
+const misses = (r: SimulationResults, held: SimulationResults, valveNodes: ReadonlySet<number>): number[] =>
+    r.nodes.map((_, i) => i).filter(i => (valveNodes.has(i) ? valveLow(r, i) : minGauge(held, i) <= ADD_VALVE_HEAD_M));
 
 /** Largest whole air pocket of the valve at node n [m³], as the solver holds it (one gas body at
  *  the valve node, ruling 2026-10-18): only this valve's air, never a neighbouring valve's spill. */
@@ -134,18 +137,19 @@ export function sizeAirValves(scenario: Scenario, inputs: DispatchInputs): AirVa
 
     // Ruling (4): while a node at least VALVE_SPACING_M from every valve is at −8 m or lower, add a
     // valve at the lowest such node and size all again. Points with no free place are reported.
-    let stage2 = fit();
+    // Q31: "at −8 m or lower" and "lowest" use the pressure held for at least 0.2 s (held).
+    let stage2 = fit(), held = holdFilter(stage2);
     for (;;) {
-        const deep = stage2.nodes.map((_, i) => i).filter(i => minGauge(stage2, i) <= ADD_VALVE_HEAD_M &&
+        const deep = stage2.nodes.map((_, i) => i).filter(i => minGauge(held, i) <= ADD_VALVE_HEAD_M &&
             placed.every(v => Math.abs(xOf(i) - v.x) >= VALVE_SPACING_M));
         if (!deep.length) break;
-        place(xOf(deep.reduce((a, b) => (minGauge(stage2, b) < minGauge(stage2, a) ? b : a))));
-        stage2 = fit();
+        place(xOf(deep.reduce((a, b) => (minGauge(held, b) < minGauge(held, a) ? b : a))));
+        stage2 = fit(); held = holdFilter(stage2);
     }
     const half = stage1.nodes.length > 1 ? (stage1.nodes[1].x - stage1.nodes[0].x) / 2 : 0;
     for (const v of placed) {
         const D = diameterAt(inputs.pipes, v.x, half);
         v.nonSlam = pocketMax(stage2, v.node) > Math.PI * D * D;
     }
-    return { stage1, stage2, valves: toValves(placed), unresolved: misses(stage2, new Set(placed.map(v => v.node))).map(xOf) };
+    return { stage1, stage2, valves: toValves(placed), unresolved: misses(stage2, held, new Set(placed.map(v => v.node))).map(xOf) };
 }

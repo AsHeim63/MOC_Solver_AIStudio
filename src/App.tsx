@@ -49,6 +49,7 @@ import { PipeSection, PumpParams, ReservoirParams, SimulationResults } from './t
 import { runWaterHammerSimulation } from './solver';
 import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatch';
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
+import { holdFilter, heldPockets } from './hold_filter';   // Q31
 import { QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
@@ -813,6 +814,9 @@ export default function App() {
     return lo;
   }, [results, animTime]);
 
+  // Q31: max/min lines and summary numbers ignore events shorter than 0.2 s (ANSWERS 2026-10-31).
+  const shownNodes = useMemo(() => (results ? holdFilter(results).nodes : []), [results]);
+
   // Interpolated HGL at animTime for smooth playback
   const animatedChartData = useMemo(() => {
     if (!results || results.fullHistory.length === 0) return [];
@@ -823,11 +827,11 @@ export default function App() {
     const tB = fh[b].time;
     const alpha = tB === tA ? 0 : Math.max(0, Math.min(1, (animTime - tA) / (tB - tA)));
     // Q27: plotted in the length unit (factor 1 in Metric, so the Metric numbers are unchanged).
-    return nodesInLength(results.nodes, uu.length).map((node, i) => ({
+    return nodesInLength(shownNodes, uu.length).map((node, i) => ({
       ...node,
       currentHead: L(fh[a].heads[i] * (1 - alpha) + fh[b].heads[i] * alpha)
     }));
-  }, [results, currentFrame, animTime, uu.length]);
+  }, [results, shownNodes, currentFrame, animTime, uu.length]);
 
   // Q14: every later stage keeps the stage-1 (unprotected) axis scale.
   const scaleResults = avStudy?.stage1 ?? results;
@@ -881,13 +885,14 @@ export default function App() {
     if (!results || !results.nodes[selectedNodeIdx]) return [];
     const node = results.nodes[selectedNodeIdx];
     const elev = node.elevation;
-    // Q27: plotted in the chosen units (pressure, flow, volume).
-    return results.fullHistory.map(f => ({
+    // Q27: plotted in the chosen units (pressure, flow, volume). Q31: air pockets shorter than 0.2 s not shown.
+    const vols = heldPockets(results, results.fullHistory.map(f => (f.vapors ? f.vapors[selectedNodeIdx] : 0)));
+    return results.fullHistory.map((f, k) => ({
       time: f.time,
       head: f.heads[selectedNodeIdx],
       pressure: fromCalc('pressure', uu.pressure, f.heads[selectedNodeIdx] - elev),
       flow: fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0),
-      vaporVolume: fromCalc('volume', uu.volume, f.vapors ? f.vapors[selectedNodeIdx] : 0)
+      vaporVolume: fromCalc('volume', uu.volume, vols[k])
     }));
   }, [results, selectedNodeIdx, uu.pressure, uu.flow, uu.volume]);
 
@@ -1523,7 +1528,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Head</p>
                         <p className="text-xl font-black text-slate-900">
-                          {fmt('length', uu.length, Math.max(...results.nodes.map(n => n.maxHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
+                          {fmt('length', uu.length, Math.max(...shownNodes.map(n => n.maxHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
                       </div>
                     </div>
@@ -1534,7 +1539,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Min Head</p>
                         <p className="text-xl font-black text-slate-900">
-                          {fmt('length', uu.length, Math.min(...results.nodes.map(n => n.minHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
+                          {fmt('length', uu.length, Math.min(...shownNodes.map(n => n.minHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
                       </div>
                     </div>
@@ -1545,7 +1550,7 @@ export default function App() {
                       <div>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Vapor / Air</p>
                         <p className="text-xl font-black text-slate-900">
-                          {fmt('volume', uu.volume, Math.max(...results.nodes.map(n => n.maxVaporVolume)))} <span className="text-xs font-normal text-slate-500">{uu.volume}</span>
+                          {fmt('volume', uu.volume, Math.max(...shownNodes.map(n => n.maxVaporVolume)))} <span className="text-xs font-normal text-slate-500">{uu.volume}</span>
                         </p>
                       </div>
                     </div>

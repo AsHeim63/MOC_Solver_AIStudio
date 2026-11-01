@@ -9,21 +9,22 @@ import type { Scenario } from './scenario_dispatch';
 import { AirValve, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { QprvStudy, SavStudy } from './surge_valves';
 import { ProfileIcons, profileIcons } from './profile_icons';
+import { holdFilter } from './hold_filter';   // Q31: max/min ignore events shorter than 0.2 s
 import { Axis, Qty, fmt, fmtMm, fromCalc, show6, nodesInLength } from './units';   // Q27: shown in the chosen units
 
 type U = Record<Qty, string>;
 
 const CHART_W = 640, CHART_H = 280;   // px; fits the A4 print width (210 mm − 2×12 mm = 703 px at 96 dpi)
 
-const maxHead = (r: SimulationResults) => Math.max(...r.nodes.map(n => n.maxHead));
-const minHead = (r: SimulationResults) => Math.min(...r.nodes.map(n => n.minHead));
+const maxHead = (r: SimulationResults) => Math.max(...holdFilter(r).nodes.map(n => n.maxHead));
+const minHead = (r: SimulationResults) => Math.min(...holdFilter(r).nodes.map(n => n.minHead));
 
 function Envelope({ r, scenario, axis, airValves = [], devices = [], u }:
   { r: SimulationResults; scenario: Scenario; axis: Axis | null; airValves?: { x: number; nonSlam: boolean }[];
     devices?: SurgeDevice[]; u: U }) {
   // Q27: plotted in the length unit (the axis arrives already in it).
   const L = (v: number) => fromCalc('length', u.length, v);
-  const nodes = nodesInLength(r.nodes, u.length);
+  const nodes = nodesInLength(holdFilter(r).nodes, u.length);
   return (
     <LineChart width={CHART_W} height={CHART_H} data={nodes} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
