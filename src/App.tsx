@@ -1589,7 +1589,7 @@ export default function App() {
                         <TrendingUp size={20} />
                       </div>
                       <div>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Head</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Max Head (held ≥ 0.2 s)</p>
                         <p className="text-xl font-black text-slate-900">
                           {fmt('length', uu.length, Math.max(...shownNodes.map(n => n.maxHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
@@ -1600,7 +1600,7 @@ export default function App() {
                         <TrendingDown size={20} />
                       </div>
                       <div>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Min Head</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Min Head (held ≥ 0.2 s)</p>
                         <p className="text-xl font-black text-slate-900">
                           {fmt('length', uu.length, Math.min(...shownNodes.map(n => n.minHead)))} <span className="text-xs font-normal text-slate-500">{uu.length}</span>
                         </p>
