@@ -22,12 +22,12 @@ const V_SEED_M3 = 1e-12;
  *  Times are read sample by sample, so uneven spacing is handled; the solver writes one frame per
  *  step anyway (t = step·baseDt, solver.ts fullHistory.push). */
 function holdEnds(r: SimulationResults): number[] | null {
-    const t = r.fullHistory.map(f => f.time), N = t.length;
-    if (N < 2 || t[N - 1] - t[0] < HOLD_S - TIME_TOL_S) return null;
-    for (let k = 1; k < N; k++) if (t[k] - t[k - 1] >= HOLD_S - TIME_TOL_S) return null;
+    const t = r.fullHistory.map(f => f.time), N = t.length, span = HOLD_S - TIME_TOL_S;
+    if (N < 2 || t[N - 1] - t[0] < span) return null;
+    for (let k = 1; k < N; k++) if (t[k] - t[k - 1] >= span) return null;
     const end: number[] = [];
     for (let k = 0, j = 0; k < N; k++) {
-        while (j < N && t[j] - t[k] < HOLD_S - TIME_TOL_S) j++;
+        while (j < N && t[j] - t[k] < span) j++;
         end.push(j);
     }
     return end;
@@ -87,5 +87,5 @@ export function holdFilter<R extends SimulationResults>(r: R): R {
  *  (pockets() above); unchanged when the filter does nothing. */
 export function heldPockets(r: SimulationResults, vols: number[]): number[] {
     const end = holdEnds(r);
-    return end ? pockets(vols, end) : vols.slice();
+    return end ? pockets(vols, end) : vols;
 }
