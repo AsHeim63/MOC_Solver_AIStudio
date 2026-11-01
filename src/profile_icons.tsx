@@ -5,7 +5,7 @@ import { useXAxisScale, useYAxisScale, ZIndexLayer, DefaultZIndexes } from 'rech
 import type { Scenario } from './scenario_dispatch';
 
 export type ProfileIconKind = 'air-valve' | 'air-valve-ns' | 'pump' | 'tank' | 'valve' | 'sav' | 'qprv';
-export interface ProfileIcon { kind: ProfileIconKind; x: number }
+export interface ProfileIcon { kind: ProfileIconKind; x: number; ns?: boolean }
 
 /** The devices the current app models: the scenario's two line ends, plus any placed air valves.
  *  Sources (scenario_dispatch.ts:9-12 routing, buildScenarioArgs :309-357; solver.ts):
@@ -16,13 +16,17 @@ export interface ProfileIcon { kind: ProfileIconKind; x: number }
  *  ValveParams.check_valve (:2845) is a flag on the end valve; neither is a separate device and the
  *  pictures 1-5 have no check-valve symbol. No other in-line device exists in the app. */
 /** Q23: `surgeValves` (SAV at x = 0, QPRV at x = L, O2) are listed first, so the end icon at the same node
- *  is drawn over the foot of their stem. */
+ *  is drawn over them (Q32: their drawing sits beside the end icon, off the node). */
 export function profileIcons(scenario: Scenario, L: number, airValves: { x: number; nonSlam: boolean }[] = [],
                              surgeValves: ProfileIcon[] = []): ProfileIcon[] {
   const ends: ProfileIcon[] = scenario === 'pump-trip' ? [{ kind: 'pump', x: 0 }, { kind: 'tank', x: L }]
     : scenario === 'gravity-valve' ? [{ kind: 'tank', x: 0 }, { kind: 'valve', x: L }]
     : [{ kind: 'pump', x: 0 }, { kind: 'valve', x: L }];
-  return [...surgeValves, ...ends, ...airValves.map(v => ({ kind: (v.nonSlam ? 'air-valve-ns' : 'air-valve') as ProfileIconKind, x: v.x }))];
+  // Q32: an air valve placed at a surge valve's node is drawn once, as the air valve of the surge-valve drawing.
+  const at = (a: { x: number }, b: { x: number }) => Math.abs(a.x - b.x) < 1e-6;
+  const surge = surgeValves.map(s => ({ ...s, ns: airValves.find(v => at(v, s))?.nonSlam ?? false }));
+  return [...surge, ...ends, ...airValves.filter(v => !surgeValves.some(s => at(v, s)))
+    .map(v => ({ kind: (v.nonSlam ? 'air-valve-ns' : 'air-valve') as ProfileIconKind, x: v.x }))];
 }
 
 const S = '#1e293b';
@@ -38,13 +42,8 @@ function Glyph({ kind }: { kind: ProfileIconKind }) {
       return (<><path d="M-9,-6 L9,6 L9,-6 L-9,6 Z" fill={S} /><line x1={0} y1={0} x2={0} y2={-9} stroke={S} strokeWidth={1.5} />
         <rect x={-4} y={-15} width={8} height={6} fill="#fff" stroke={S} strokeWidth={1.5} /></>);
     case 'sav':
-    case 'qprv':   // Q23: surge valve above its node, as the air valve: stem foot at y = 0, valve body, label;
-                   // the body clears an air valve at the same node (air-valve icon top y = -30) by a visible
-                   // gap of stem, and the label has a white halo so lines and icons below it do not cross it
-      return (<><line x1={0} y1={0} x2={0} y2={-40} stroke={S} strokeWidth={2} />
-        <path d="M-8,-51 L8,-41 L8,-51 L-8,-41 Z" fill="#fff" stroke={S} strokeWidth={2} />
-        <text y={-55} textAnchor="middle" fontSize={8} fontWeight={700} fill={S} stroke="#fff" strokeWidth={3}
-          paintOrder="stroke">{kind === 'sav' ? 'SAV' : 'QPRV'}</text></>);
+    case 'qprv':   // Q32 (Assaf's sketches builder/inputs/Q32_*.png): drawn by SurgeGlyph, not here
+      return null;
     default: {   // air valve: stem foot at y = 0, circle above it, triangle on top
       const ns = kind === 'air-valve-ns';
       return (<><line x1={0} y1={0} x2={0} y2={-8} stroke={S} strokeWidth={2} />
@@ -54,6 +53,31 @@ function Glyph({ kind }: { kind: ProfileIconKind }) {
         {ns && <path d="M-3.5,-28.5 L3.5,-28.5 L0,-25 Z" fill="none" stroke={S} strokeWidth={1} />}</>);
     }
   }
+}
+
+/** Q32: SAV / QPRV with its air valve, as Assaf's sketches. (cx, cy) = the connection point on the pipe,
+ *  CONN_DX px downstream of the pump (SAV) or upstream of the end valve (QPRV), relative to the node. One
+ *  vertical line through it: air valve above (as the air-valve glyph; NS when the air valve placed at that node
+ *  is Non-Slam, C otherwise or when none is placed), below an elbow into the surge valve
+ *  (crossed valve body with a dome actuator) beside the pump / under the end valve, outlet stub on its far side. */
+const CONN_DX = 16;
+function SurgeGlyph({ kind, cx, cy, ns }: { kind: 'sav' | 'qprv'; cx: number; cy: number; ns: boolean }) {
+  const s = kind === 'sav' ? -1 : 1;           // side of the surge valve: SAV towards the pump, QPRV under the end valve
+  const vx = cx + 14 * s, vy = cy + 28;        // surge-valve centre
+  return (<>
+    <line x1={cx} y1={cy - 9} x2={cx} y2={vy} stroke={S} strokeWidth={1.5} />
+    <line x1={cx} y1={vy} x2={vx - 7 * s} y2={vy} stroke={S} strokeWidth={1.5} />
+    <circle cx={cx} cy={cy - 16} r={7} fill="#fff" stroke={S} strokeWidth={2} />
+    <text x={cx} y={cy - 13.5} textAnchor="middle" fontSize={ns ? 7 : 8} fontWeight={700} fill={S}>{ns ? 'NS' : 'C'}</text>
+    <path d={`M${cx - 7},${cy - 31} L${cx + 7},${cy - 31} L${cx},${cy - 23} Z`} fill="#fff" stroke={S} strokeWidth={2} />
+    {ns && <path d={`M${cx - 3.5},${cy - 29.5} L${cx + 3.5},${cy - 29.5} L${cx},${cy - 26} Z`} fill="none" stroke={S} strokeWidth={1} />}
+    <path d={`M${vx - 7},${vy - 5} L${vx + 7},${vy + 5} L${vx + 7},${vy - 5} L${vx - 7},${vy + 5} Z`} fill="#fff" stroke={S} strokeWidth={1.5} />
+    <line x1={vx} y1={vy} x2={vx} y2={vy - 9} stroke={S} strokeWidth={1.2} />
+    <path d={`M${vx - 6},${vy - 9} A6,6 0 0 1 ${vx + 6},${vy - 9} Z`} fill="#fff" stroke={S} strokeWidth={1.2} />
+    <line x1={vx + 7 * s} y1={vy} x2={vx + 11 * s} y2={vy} stroke={S} strokeWidth={1.5} />
+    <line x1={vx + 11 * s} y1={vy} x2={vx + 11 * s} y2={vy + 5} stroke={S} strokeWidth={1.5} />
+    <circle cx={cx} cy={cy} r={2.5} fill="#fff" stroke={S} strokeWidth={1.2} />
+  </>);
 }
 
 /** Child of a recharts LineChart. pts = the Pipeline line's points (x = the X-axis value, z = elevation).
@@ -76,14 +100,26 @@ export function ProfileIcons({ pts, icons }: { pts: { x: number; z: number }[]; 
     }
     return { px: ax + (bx - ax) * t, py: ay + (by - ay) * t };
   };
+  // Q32: the y of the drawn line at pixel column px (the surge valves' connection point sits off the node).
+  const yAtPx = (px: number) => {
+    for (let i = 1; i < pts.length; i++) {
+      const ax = xs(pts[i - 1].x), bx = xs(pts[i].x), ay = ys(pts[i - 1].z), by = ys(pts[i].z);
+      if (ax === undefined || bx === undefined || ay === undefined || by === undefined) continue;
+      if ((px - ax) * (px - bx) <= 0) return ax === bx ? ay : ay + (by - ay) * (px - ax) / (bx - ax);
+    }
+    return undefined;
+  };
   return (
     // Above the lines (line 400), below the axes (500): icons are not crossed by the HGL / Max / Min lines.
     <ZIndexLayer zIndex={DefaultZIndexes.line + 50}><g pointerEvents="none">
       {icons.map(ic => {
         const p = at(ic.x);
-        return p && (
+        if (!p) return null;
+        const surge = ic.kind === 'sav' || ic.kind === 'qprv' ? ic.kind : null;
+        const dx = surge === 'sav' ? CONN_DX : -CONN_DX, cy = surge ? (yAtPx(p.px + dx) ?? p.py) - p.py : 0;
+        return (
           <g key={`${ic.kind}@${ic.x}`} data-q17={ic.kind} data-x={ic.x} transform={`translate(${p.px},${p.py})`}>
-            <Glyph kind={ic.kind} />
+            {surge ? <SurgeGlyph kind={surge} cx={dx} cy={cy} ns={!!ic.ns} /> : <Glyph kind={ic.kind} />}
           </g>
         );
       })}
