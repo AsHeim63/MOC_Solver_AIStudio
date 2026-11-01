@@ -86,21 +86,31 @@ function UnitInput({ qty, unit = '', value, onValue, className, step, min }: {
   );
 }
 
-/** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object. */
-function GateTooltip({ active, payload, caveats, u }: { active?: boolean; payload?: any[]; caveats?: string[]; u: Record<Qty, string> }) {
+/** Q35: the second unit the Screen 2 tooltip shows beside the chosen one (SPEC_S63.md §3.2: pressure in
+ *  m of water and bar, flow in m³/s and m³/h): a head unit pairs with the system's gauge unit and back;
+ *  a flow unit pairs with the other of the system's two volume-rate units. */
+const pairedUnit = (qty: 'pressure' | 'flow', system: UnitSystem, unit: string): string =>
+  qty === 'pressure'
+    ? (isHeadUnit(unit) ? (system === 'us' ? 'psig' : 'barg') : (system === 'us' ? 'ft' : 'm'))
+    : (system === 'us' ? (unit === 'gpm' ? 'ft³/s' : 'gpm') : (unit === 'm³/h' ? 'm³/s' : 'm³/h'));
+
+/** Screen 2 tooltip: the seven SPEC_S63.md §3.2 fields. Head and pressure come from one object.
+ *  Q35: pressure and flow each show the chosen unit and its paired unit at once (§3.2). */
+function GateTooltip({ active, payload, caveats, u, system }: { active?: boolean; payload?: any[]; caveats?: string[]; u: Record<Qty, string>; system: UnitSystem }) {
   if (!active || !payload || payload.length === 0) return null;
   const t = tooltipFields(payload[0].payload as GateChartPoint);
   const hp = t.headAndPressure;
+  const pU = pairedUnit('pressure', system, u.pressure), qU = pairedUnit('flow', system, u.flow);
   return (
-    <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-3 text-[11px] font-mono min-w-[18rem]">
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+    <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-3 text-[11px] font-mono max-w-[calc(100vw-2rem)]">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 whitespace-nowrap">
         <span>DISTANCE {fmt('length', u.length, t.distance, 1)} {u.length}</span>
         <span>TOTAL HEAD {fmt('length', u.length, hp.head)} {u.length}</span>
         <span>ELEVATION {fmt('length', u.length, t.elevation)} {u.length}</span>
-        <span>PRESSURE {fmt('pressure', u.pressure, hp.pressureM)} {u.pressure}</span>
+        <span>PRESSURE {fmt('pressure', u.pressure, hp.pressureM)} {u.pressure} ({fmt('pressure', pU, hp.pressureM)} {pU})</span>
         {t.flow.map(f => (
           <React.Fragment key={f.pipeId}>
-            <span>FLOW {fmt('flow', u.flow, f.m3s)} {u.flow}{t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
+            <span>FLOW {fmt('flow', u.flow, f.m3s)} {u.flow} ({fmt('flow', qU, f.m3s)} {qU}){t.flow.length > 1 ? ` [${f.pipeId}]` : ''}</span>
             <span>VELOCITY {fmt('velocity', u.velocity, f.velocity)} {u.velocity}</span>
           </React.Fragment>
         ))}
@@ -1992,7 +2002,7 @@ export default function App() {
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} />
                   <YAxis label={{ value: `Head (${uu.length})`, angle: -90, position: 'insideLeft', fontSize: 11, fontWeight: 600 }}
                     tick={{ fontSize: 10 }} tickFormatter={(v) => Math.round(v).toString()} domain={['auto', 'auto']} />
-                  <Tooltip content={<GateTooltip caveats={caveats} u={uu} />} />
+                  <Tooltip content={<GateTooltip caveats={caveats} u={uu} system={unitChoice.system} />} />
                   <Legend verticalAlign="top" align="right" iconType="plainline" wrapperStyle={{ fontSize: '10px' }} />
                   <Line name="Pipeline" type="linear" dataKey="elevation" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line name="Pressure line (HGL)" type="linear" dataKey="head" stroke="#0d9488" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
