@@ -51,7 +51,7 @@ import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatc
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { holdFilter, heldPockets } from './hold_filter';   // Q31
 import { QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
-import { scenarioFromControl, Operation, ValveSource, ValveType, VALVE_TYPES, VALVE_TYPE_PARAMS, valveModelFromControl } from './scenario_control';
+import { scenarioFromControl, Operation, ValveSource, ValveType, VALVE_TYPES, VALVE_TYPE_PARAMS, VALVE_TYPE_PARAM, valveModelFromControl } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report, SetView, solutionSets } from './report';   // Q24, Q23
 import { projectText, parseProject } from './project_file';   // Q25
@@ -273,6 +273,7 @@ export default function App() {
   // Q36: valve type / closure mode and its parameter (a, b, ρ); 'generic' = today's run.
   const [valveType, setValveType] = useState<ValveType>('generic');
   const [valveTypeParams, setValveTypeParams] = useState(VALVE_TYPE_PARAMS);
+  const valveParam = VALVE_TYPE_PARAM[valveType];
   // Holds the message when the solver refuses a run, so it can be shown on screen (S62).
   const [simError, setSimError] = useState<string | null>(null);
   
@@ -973,8 +974,7 @@ export default function App() {
       : [[`Valve ${uu.valve}`, `${fmt('valve', uu.valve, valveKv0)} ${valveBasis(uu.valve)}`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
          ['Closure exponent', String(valveExponent)],
          ['Valve type', VALVE_TYPES.find(([k]) => k === valveType)![1] +
-           (valveType === 'butterfly' ? ` (a = ${valveTypeParams.a})` : valveType === 'gate' ? ` (b = ${valveTypeParams.b})`
-            : valveType === 'linear-resistance' ? ` (ρ = ${valveTypeParams.rho})` : '')]]) as [string, string][],
+           (valveParam ? ` (${valveParam.sym} = ${valveTypeParams[valveParam.key]})` : '')]]) as [string, string][],
       [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, show('pressure', outletPressure)],
       ['Elevation at X = 0', show('length', sourceElevation)]);
     const name = scenario === 'pump-trip' ? 'Pump-Operation — pump trip'
@@ -1321,18 +1321,14 @@ export default function App() {
                         {VALVE_TYPES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
                       </select>
                     </div>
-                    {(['butterfly', 'gate', 'linear-resistance'] as ValveType[]).includes(valveType) && (() => {
-                      const key = valveType === 'butterfly' ? 'a' : valveType === 'gate' ? 'b' : 'rho';
-                      const label = key === 'a' ? 'Butterfly a (3 – 4)' : key === 'b' ? 'Gate b (0.2 – 0.3)' : 'Resistance Ratio (> 1)';
-                      return (
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{label}</label>
-                          <UnitInput step={key === 'b' ? '0.01' : key === 'a' ? '0.1' : '1'} value={String(valveTypeParams[key])}
-                            onValue={v => setValveTypeParams(p => ({ ...p, [key]: Number(v) }))}
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
-                        </div>
-                      );
-                    })()}
+                    {valveParam && (
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{valveParam.label}</label>
+                        <UnitInput step={valveParam.step} value={String(valveTypeParams[valveParam.key])}
+                          onValue={v => setValveTypeParams(p => ({ ...p, [valveParam.key]: Number(v) }))}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                      </div>
+                    )}
                   </div>
                   {(valveType === 'linear-resistance' || valveType === 'linear-flow') && (
                     <p className="text-[10px] text-slate-400">

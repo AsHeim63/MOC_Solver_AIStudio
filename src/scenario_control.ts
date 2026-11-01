@@ -28,6 +28,12 @@ export const VALVE_TYPES: [ValveType, string][] = [
     ['globe-linear', 'Globe (linear)'], ['linear-resistance', 'Linear resistance'], ['linear-flow', 'Linear flow'],
 ];
 export const VALVE_TYPE_PARAMS = { a: VALVE_BUTTERFLY_A.def, b: VALVE_GATE_B.def, rho: VALVE_RHO_DEFAULT };
+/** The one parameter a valve type takes, if any: its key in VALVE_TYPE_PARAMS, symbol, input label, input step. */
+export const VALVE_TYPE_PARAM: Partial<Record<ValveType, { key: keyof typeof VALVE_TYPE_PARAMS; sym: string; label: string; step: string }>> = {
+    butterfly:           { key: 'a',   sym: 'a', label: 'Butterfly a (3 – 4)',    step: '0.1' },
+    gate:                { key: 'b',   sym: 'b', label: 'Gate b (0.2 – 0.3)',     step: '0.01' },
+    'linear-resistance': { key: 'rho', sym: 'ρ', label: 'Resistance Ratio (> 1)', step: '1' },
+};
 
 export function valveModelFromControl(type: ValveType, p: { a: number; b: number; rho: number }): ValveModel {
     switch (type) {
