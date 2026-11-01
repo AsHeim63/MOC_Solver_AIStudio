@@ -41,7 +41,7 @@ function Envelope({ r, scenario, axis, airValves = [], devices = [], u }:
       {nodes.length > 1 && (
         <ProfileIcons pts={nodes.map(n => ({ x: n.x, z: n.elevation }))}
           icons={profileIcons(scenario, nodes[nodes.length - 1].x, airValves.map(v => ({ ...v, x: L(v.x) })),
-                              devices.map(d => ({ kind: d.kind, x: L(d.x) })))} />
+                              devices.map(d => ({ kind: d.kind, x: L(d.x) })), (nodes[1].x - nodes[0].x) / 2)} />
       )}
     </LineChart>
   );

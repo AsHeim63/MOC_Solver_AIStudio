@@ -1768,7 +1768,8 @@ export default function App() {
                               <ProfileIcons pts={results.nodes.map(n => ({ x: L(n.x), z: L(n.elevation) }))}
                                 icons={profileIcons(scenario, L(results.nodes[results.nodes.length - 1].x),
                                   protectedShown ? avStudy.valves.map(v => ({ ...v, x: L(v.x) })) : [],
-                                  surgeIcons.map(d => ({ kind: d.kind, x: L(d.x) })))} />
+                                  surgeIcons.map(d => ({ kind: d.kind, x: L(d.x) })),
+                                  (L(results.nodes[1].x) - L(results.nodes[0].x)) / 2)} />
                             )}
                           </LineChart>
                         </ResponsiveContainer>
