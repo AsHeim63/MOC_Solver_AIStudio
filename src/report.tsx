@@ -49,7 +49,7 @@ function Envelope({ r, scenario, axis, airValves = [], devices = [], u }:
 
 const H2 = ({ children }: { children: React.ReactNode }) =>
   <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700 border-b border-slate-300 pb-1 mb-2 mt-6">{children}</h2>;
-const MaxMin = ({ r, u }: { r: SimulationResults; u: U }) => (
+export const MaxMin = ({ r, u }: { r: SimulationResults; u: U }) => (
   <p className="text-xs mb-2">Max Head <b>{fmt('length', u.length, maxHead(r))} {u.length}</b> &nbsp;·&nbsp; Min Head <b>{fmt('length', u.length, minHead(r))} {u.length}</b></p>
 );
 
@@ -69,8 +69,8 @@ export interface SolutionSet {
   devices: SurgeDevice[];
 }
 
-/** The sets sized so far. The SAV runs carry the air valves placed by the previous run (the App drops the
- *  SAV study whenever the air valves change). The QPRV study runs without air valves (Q21). */
+/** The sets sized so far. The SAV and QPRV runs both carry the air valves placed by the previous run
+ *  (ANSWERS 2026-10-29 Standing; Q43); the App drops both studies whenever the air valves change. */
 export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValves: AirValve[]): SolutionSet[] {
   const out: SolutionSet[] = [];
   if (sv) {
@@ -80,7 +80,7 @@ export function solutionSets(sv: SavStudy | null, qp: QprvStudy | null, airValve
   }
   if (qp) {
     const end = qp.stage2.nodes[qp.stage2.nodes.length - 1], H_open = qp.stage2.qprv?.H_open;
-    out.push({ name: 'QPRV', result: qp.stage2, airValves: [],
+    out.push({ name: 'Air valves + QPRV', result: qp.stage2, airValves,
       devices: [{ kind: 'qprv', x: end.x, ...qp.qprv, sets: H_open === undefined ? []
         : [['set', H_open - end.elevation], ['reference', H_open - QPRV_SET_ABOVE_REF_M - end.elevation]] }] });
   }

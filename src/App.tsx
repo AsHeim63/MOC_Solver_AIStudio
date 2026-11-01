@@ -53,7 +53,7 @@ import { holdFilter, heldPockets } from './hold_filter';   // Q31
 import { QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
 import { scenarioFromControl, Operation, ValveSource, ValveType, VALVE_TYPES, VALVE_TYPE_PARAMS, VALVE_TYPE_PARAM, valveModelFromControl } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
-import { Report, SetView, solutionSets } from './report';   // Q24, Q23
+import { Report, SetView, MaxMin, solutionSets } from './report';   // Q24, Q23, Q43
 import { projectText, parseProject } from './project_file';   // Q25
 import { Qty, UnitChoice, UnitSystem, CHOICES, DEFAULT_UNITS, validChoice, unitsOf, toCalc, fromCalc, show6, isHeadUnit, fmt, fmtMm, nodesInLength, niceAxis, valveBasis } from './units';   // Q26, Q27
 // ── Row 3.11 Unit C, D-5b ──────────────────────────────────────────────────────────────────────
@@ -238,7 +238,8 @@ export default function App() {
     setAvApproved(on);
     try { localStorage.setItem('hg_pkg_air_valves', on ? '1' : '0'); } catch { /* storage blocked */ }
     if (!on && avStudy) { setIsAnimating(false); setResults(avStudy.stage1); setAvStudy(null); }
-    if (!on) setSvStudy(null);   // Q22: a SAV result never outlives the air valves it was sized with
+    // Q22/Q43: a SAV or QPRV result never outlives the air valves it was sized with
+    if (!on) { setSvStudy(null); stopQprvStudy(); setQpStudy(null); }
   };
   // Q23: QPRV and SAV in the device package. No stored choice = approved (their sections were always shown
   // before Q23). Not approved -> no section, no result, no row, no icon.
@@ -683,7 +684,8 @@ export default function App() {
         dropReportIfInputsChanged();
         const study = sizeAirValves(scenario, buildDispatchInputs());
         setAvStudy(study);
-        setSvStudy(null);   // Q22: sized with the previous air valves
+        setSvStudy(null);   // Q22/Q43: SAV and QPRV were sized with the previous air valves
+        stopQprvStudy(); setQpStudy(null);
         setResults(study.stage2);
         setSimError(null);
       } catch (error) {
@@ -695,8 +697,11 @@ export default function App() {
     }, 100);
   };
 
-  // Q21/Q29: QPRV size and closing time found after the Unprotected run, in a Worker (no screen freeze).
+  // Q21/Q29: QPRV size and closing time, in a Worker (no screen freeze). Q43: searched from the system with the
+  // air valves placed (ANSWERS 2026-10-29 Standing), as the SAV.
   const handleSizeQprv = () => {
+    if (!avStudy) return;   // the air-valve stage first (button disabled until it has run)
+    const airValves = avStudy.valves;
     stopQprvStudy();
     setIsSimulating(true);
     dropReportIfInputsChanged();
@@ -710,7 +715,7 @@ export default function App() {
     };
     w.onmessage = (e: MessageEvent<{ study?: QprvStudy; error?: string }>) => done(e.data.study ?? null, e.data.error);
     w.onerror = (e: ErrorEvent) => done(null, e.message);
-    w.postMessage({ scenario, inputs: buildDispatchInputs() });
+    w.postMessage({ scenario, inputs: { ...buildDispatchInputs(), airValves } });
   };
 
   // Q22: SAV size, closing time and hold-open searched from the system with the air valves placed
@@ -857,9 +862,13 @@ export default function App() {
   const protectedShown = !!avStudy && results === avStudy.stage2;   // Q15 heading
   const sets = solutionSets(svStudy, qpStudy, avStudy?.valves ?? []);   // Q23
   const avInSet = sets.find(s => s.airValves.length > 0);   // Q23: the air valves are listed once, in that set
-  // Q23: SAV / QPRV icons on the main profile (sized = ticked: unticking drops the study). The SAV set carries
-  // the air valves, so it shows with them; the QPRV runs without air valves, so not over the air-valve runs' Unprotected view.
-  const surgeIcons = sets.flatMap(s => s.devices).filter(d => d.kind === 'sav' ? protectedShown : !avStudy || protectedShown);
+  // Q23: SAV / QPRV icons on the main profile (sized = ticked: unticking drops the study). Both sets carry the
+  // air valves (Q43), so their icons show with them, never over the Unprotected view.
+  const surgeIcons = protectedShown ? sets.flatMap(s => s.devices) : [];
+  // Q43: the next step after the Unprotected run is "Size air valves"; say where to turn it on when it is off.
+  const avFirst = !avStudy && (
+    <p className="mt-4 text-xs text-slate-500">Size the air valves first.{!avApproved && ' Air valves are off: tick "Air valves" in Preferences > Device package.'}</p>
+  );
   const yAxisDomain = useMemo(() => {
     if (!scaleResults) return ['auto', 'auto'] as [any, any];
     const minYValue = Math.min(...scaleResults.nodes.map(n => Math.min(n.elevation, n.minHead)));
@@ -920,7 +929,12 @@ export default function App() {
   const tabYDomain = useMemo(() => {
     const r = avStudy?.stage1 ?? results, z = r?.nodes[selectedNodeIdx]?.elevation;
     if (!r || z === undefined || !r.fullHistory.length) return { pressure: undefined, flow: undefined };
-    const span = (v: number[]) => niceAxis(Math.min(...v), Math.max(...v));
+    // Q43: a constant series (the pressure at a reservoir node) varies only by rounding; niceAxis then gives one
+    // tick and the chart no Y labels. Treat it as one value, which niceAxis pads.
+    const span = (v: number[]) => {
+      const lo = Math.min(...v), a = niceAxis(lo, Math.max(...v));
+      return a.ticks.length >= 2 ? a : niceAxis(lo, lo);
+    };
     return {
       pressure: span(r.fullHistory.map(f => fromCalc('pressure', uu.pressure, f.heads[selectedNodeIdx] - z))),
       flow: span(r.fullHistory.map(f => fromCalc('flow', uu.flow, f.flows ? f.flows[selectedNodeIdx] : 0))),
@@ -1647,21 +1661,29 @@ export default function App() {
                     )}
                   </section>
                   )}
+                  {/* Q43: air valves off -> the process stops here; name where to turn them on */}
+                  {!avApproved && (
+                  <section data-q43="air-valves-off" className="bg-white px-6 py-4 rounded-3xl shadow-sm border border-slate-200">
+                    <h3 className="text-lg font-bold">Air Valves</h3>
+                    <p className="mt-1 text-xs text-slate-500">Air valves are off. To size air valves (and then the QPRV or SAV), tick "Air valves" in Preferences &gt; Device package.</p>
+                  </section>
+                  )}
 
                   {/* Q21: QPRV sizing (valve-closure scenarios) */}
                   {qprvApproved && scenario !== 'pump-trip' && (
                   <section data-q21="qprv" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-lg font-bold mr-auto">QPRV</h3>
-                      <button onClick={handleSizeQprv} disabled={isSimulating}
+                      <button onClick={handleSizeQprv} disabled={isSimulating || !avStudy}
                         className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
                         Size QPRV
                       </button>
                     </div>
+                    {avFirst}
                     {qpStudy && (
                       <p className="mt-4 text-xs text-slate-700">
                         Size {inUnit(qpStudy.qprv.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, qpStudy.qprv.Kv)}, closing time {Math.round(qpStudy.qprv.closingTime * 10) / 10} s,
-                        max head {fmt('length', uu.length, qpStudy.maxHead)} {uu.length} (Unprotected {fmt('length', uu.length, peakAll(qpStudy.stage1))} {uu.length});
+                        max head {fmt('length', uu.length, qpStudy.maxHead)} {uu.length} (without QPRV {fmt('length', uu.length, peakAll(qpStudy.stage1))} {uu.length});
                         {' '}{qpStudy.tried.length} runs.
                         {qpStudy.notes.map(n => <span key={n} className="text-amber-700"> {n}.</span>)}
                       </p>
@@ -1679,7 +1701,7 @@ export default function App() {
                         Size SAV
                       </button>
                     </div>
-                    {!avStudy && <p className="mt-4 text-xs text-slate-500">Size the air valves first.</p>}
+                    {avFirst}
                     {svStudy && (
                       <p className="mt-4 text-xs text-slate-700">
                         Size {inUnit(svStudy.sav.size_mm)} {uu.diameter}, {uu.valve} {fmt('valve', uu.valve, svStudy.sav.Kv)}, closing time {svStudy.sav.closingTime} s,
@@ -1697,6 +1719,13 @@ export default function App() {
                   <section data-q23="sets" className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 text-xs">
                     {/* one "Protected System" heading: the top one when it already says so */}
                     <h3 className="text-lg font-bold">{protectedShown ? 'Solution sets' : 'Protected System'}</h3>
+                    {/* Q43: the reference every set is compared with, on the same screen and the same axis */}
+                    {scaleResults && (
+                      <div data-q43="unprotected-ref" className="mt-2 text-slate-600">
+                        <h4 className="font-bold mb-1">Unprotected System (no devices)</h4>
+                        <MaxMin r={scaleResults} u={uu} />
+                      </div>
+                    )}
                     {sets.map(s => <React.Fragment key={s.name}><SetView set={s} scenario={scenario} axis={yAxisShown} u={uu} /></React.Fragment>)}
                   </section>
                   )}
