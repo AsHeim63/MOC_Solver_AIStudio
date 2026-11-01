@@ -1065,13 +1065,17 @@ export function CALC_AIR_VALVE_N(
     dt:     number,
     A_in:   number,
     A_out:  number,
-    Q_feed = 0.0   // Q16: known liquid inflow into the node [m³/s] (running pump at the line start)
+    Q_feed = 0.0,  // Q16: known liquid inflow into the node [m³/s] (running pump at the line start)
+    Q_sav?: (H: number) => number   // Q41: SAV outflow at the node [m³/s] (SECTION 7i): 0 at H ≤ Z, rising
 ): JunctionResultN {
     let sum_inv_B = 0.0, sum_C_over_B = 0.0;
     for (const f of faces) { sum_inv_B += 1.0 / f.B; sum_C_over_B += f.C / f.B; }
     const a_coef   = dt * sum_inv_B;
     const b_coef   = V_old - dt * (sum_C_over_B + Q_feed);
-    const vol = (H: number) => a_coef * H + b_coef;   // pocket volume at H
+    // Pocket volume at H. Q41 (O2, one node, flows summed): an open SAV drains the node at the NEW
+    // head (implicit, as the air flow) — vol stays rising in H, so the bisections below hold.
+    const vol = Q_sav === undefined ? (H: number) => a_coef * H + b_coef
+                                    : (H: number) => a_coef * H + b_coef + dt * Q_sav(H);
     const H_liquid = (sum_C_over_B + Q_feed) / sum_inv_B;
     const KC       = AIR_RT / (RHO_W * G);
     const air = (H: number) => Math.max(0, C_air + dt * KC * AIR_MASS_FLOW(H - Z + H_BARO, A_in, A_out));
@@ -1081,7 +1085,15 @@ export function CALC_AIR_VALVE_N(
     if (V_old <= 0 && C_air <= 0 && H_liquid >= Z) {
         H = H_liquid; V_g = 0; C = 0;                          // closed, full of liquid
     } else {
-        const H_zero = -b_coef / a_coef;                       // head at which the pocket volume is 0
+        let H_zero = -b_coef / a_coef;                         // head at which the pocket volume is 0
+        if (Q_sav !== undefined && H_zero > Z) {               // Q41: root above Z, where the SAV drains;
+            let zl = Z, zh = H_zero;                           // vol(zl) < 0 ≤ vol(zh)
+            for (let k = 0; k < AIR_BISECT_ITERS; k++) {
+                const mid = 0.5 * (zl + zh);
+                if (vol(mid) < 0) zl = mid; else zh = mid;
+            }
+            H_zero = 0.5 * (zl + zh);
+        }
         const H_vap  = Z + VAPOR_H_REL;
         let lo = Math.max(H_zero, H_vap);
         if (gap(lo) >= 0) {
@@ -2155,14 +2167,15 @@ function runCore(
     // not air that entered.
     const avAir = new Set<number>();
     const AIR_VALVE_STEP = (n: number, av: { A_in: number; A_out: number }, C_air: number,
-                            faces: JunctionFaceN[], Q_feed = 0.0) => {
+                            faces: JunctionFaceN[], Q_feed = 0.0, Q_sav?: (H: number) => number) => {
         const r = CALC_AIR_VALVE_N(faces, prevState.V_g[n], C_air, prevState.Z[n], grid.dt,
-                                   av.A_in, av.A_out, Q_feed);
+                                   av.A_in, av.A_out, Q_feed, Q_sav);
         newState.H[n] = r.H; newState.V_g[n] = r.V_g; newState.C_gas[n] = r.C_gas;
         return r.Q;
     };
-    const AIR_VALVE_END = (n: number, av: { A_in: number; A_out: number }, face: JunctionFaceN, Q_feed = 0.0) => {
-        const Q = AIR_VALVE_STEP(n, av, avAir.has(n) ? prevState.C_gas[n] : 0.0, [face], Q_feed)[0];
+    const AIR_VALVE_END = (n: number, av: { A_in: number; A_out: number }, face: JunctionFaceN, Q_feed = 0.0,
+                           Q_sav?: (H: number) => number) => {
+        const Q = AIR_VALVE_STEP(n, av, avAir.has(n) ? prevState.C_gas[n] : 0.0, [face], Q_feed, Q_sav)[0];
         if (newState.V_g[n] > 0) avAir.add(n); else avAir.delete(n);
         return Q;
     };
@@ -2313,10 +2326,25 @@ function runCore(
         } else {
             const av0 = avAt?.get(0);
             let Q_feed16: number | undefined;   // Q20: the Q16 known pump inflow, when that branch ran
+            // Q20 SAV opening (SECTION 7i) from the previous step's pressure. Q41: set before the
+            // air-valve node so that, while an air pocket sits at node 0, the open SAV drains it at
+            // the new head (O2: one node, flows summed); Q_s = 0 below atmospheric.
+            let Q_sav: ((H: number) => number) | undefined;
+            if (sv !== undefined) {
+                const p0 = prevState.H[0] - prevState.Z[0];
+                if (p0 < sv.p_low) svLatched = true;
+                svOpen = SAV_OPENING(sv, svOpen, p0, grid.dt,
+                                     svLatched && sv.holdOpenUntil !== undefined && t <= sv.holdOpenUntil);
+                if (svOpen > 0.0) {
+                    const Cq_s = svOpen * sv.Cq, Z0 = prevState.Z[0];
+                    Q_sav = (H: number) => Cq_s * Math.sqrt(Math.max(H - Z0, 0.0));
+                }
+            }
             if (av0 !== undefined && PUMP_ALPHA(pump, t) < PUMP_STOP_ALPHA) {   // Q14: pump stopped
                 newFlow.setQin(0, 0.0);                    // check valve shut (DOMAIN §5 stopped branch)
                 newFlow.setQout(0, AIR_VALVE_END(0, av0,
-                    { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false }));
+                    { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false },
+                    0.0, Q_sav));
             } else {
                 CALC_BC_PUMP_DGCM(0, coefsPump, prevState, newState, newFlow, grid, pump, pumpHead, t, pipes[0].p);
                 if (av0 !== undefined && pump.curve === undefined &&
@@ -2325,21 +2353,17 @@ function runCore(
                     newFlow.setQin(0, Q_feed);
                     newFlow.setQout(0, AIR_VALVE_END(0, av0,
                         { C: coefsPump.Cm, B: coefsPump.B2, dxA: pipes[0].p.dx * pipes[0].p.A, incoming: false },
-                        Q_feed));
+                        Q_feed, Q_sav));
                     Q_feed16 = Q_feed;
                 }
             }
             if (sv !== undefined) {
-                // Q20 SAV (SECTION 7i): opening from the previous step's pressure. It discharges when
-                // the branch above left node 0 liquid, or (pump stopped, no air valve) holding only a
-                // gas body at or above atmospheric (DGCM free gas, or a cavity collapsing this step);
-                // that body is then filled within the step (its volume in continuity, CALC_BC_SAV).
-                // Pump face as that branch had it: the Q16 known inflow, the check valve shut, or the
-                // running curve. A cavity or an air pocket: no discharge (Q_s = 0 below atmospheric).
-                const p0 = prevState.H[0] - prevState.Z[0];
-                if (p0 < sv.p_low) svLatched = true;
-                svOpen = SAV_OPENING(sv, svOpen, p0, grid.dt,
-                                     svLatched && sv.holdOpenUntil !== undefined && t <= sv.holdOpenUntil);
+                // Q20 SAV (SECTION 7i). Here it discharges when the branch above left node 0 liquid,
+                // or (pump stopped, no air valve) holding only a gas body at or above atmospheric
+                // (DGCM free gas, or a cavity collapsing this step); that body is then filled within
+                // the step (its volume in continuity, CALC_BC_SAV). Pump face as that branch had it:
+                // the Q16 known inflow, the check valve shut, or the running curve. A cavity: no
+                // discharge (Q_s = 0 below atmospheric). An air pocket held: drained in AIR_VALVE_END.
                 const alpha = PUMP_ALPHA(pump, t);
                 if (svOpen > 0.0 && (newState.V_g[0] <= 1e-12 ||
                     (alpha < PUMP_STOP_ALPHA && av0 === undefined && newState.H[0] >= prevState.Z[0]))) {
