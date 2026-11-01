@@ -73,15 +73,15 @@ function SurgeGlyph({ kind, cx, cy, ns }: { kind: 'sav' | 'qprv'; cx: number; cy
   const vx = cx + VALVE_DX * s, vy = cy + VALVE_DY;        // surge-valve centre
   return (<>
     <line x1={cx} y1={cy - 9} x2={cx} y2={vy} stroke={S} strokeWidth={1.5} />
-    <line x1={cx} y1={vy} x2={vx - 7 * s} y2={vy} stroke={S} strokeWidth={1.5} />
+    <line x1={cx} y1={vy} x2={vx - AV_R * s} y2={vy} stroke={S} strokeWidth={1.5} />
     <circle cx={cx} cy={cy - 16} r={AV_R} fill="#fff" stroke={S} strokeWidth={2} />
     <text x={cx} y={cy - 13.5} textAnchor="middle" fontSize={ns ? 7 : 8} fontWeight={700} fill={S}>{ns ? 'NS' : 'C'}</text>
-    <path d={`M${cx - 7},${cy - 31} L${cx + 7},${cy - 31} L${cx},${cy - 23} Z`} fill="#fff" stroke={S} strokeWidth={2} />
+    <path d={`M${cx - AV_R},${cy - 31} L${cx + AV_R},${cy - 31} L${cx},${cy - 23} Z`} fill="#fff" stroke={S} strokeWidth={2} />
     {ns && <path d={`M${cx - 3.5},${cy - 29.5} L${cx + 3.5},${cy - 29.5} L${cx},${cy - 26} Z`} fill="none" stroke={S} strokeWidth={1} />}
-    <path d={`M${vx - 7},${vy - 5} L${vx + 7},${vy + 5} L${vx + 7},${vy - 5} L${vx - 7},${vy + 5} Z`} fill="#fff" stroke={S} strokeWidth={1.5} />
+    <path d={`M${vx - AV_R},${vy - 5} L${vx + AV_R},${vy + 5} L${vx + AV_R},${vy - 5} L${vx - AV_R},${vy + 5} Z`} fill="#fff" stroke={S} strokeWidth={1.5} />
     <line x1={vx} y1={vy} x2={vx} y2={vy - 9} stroke={S} strokeWidth={1.2} />
     <path d={`M${vx - 6},${vy - 9} A6,6 0 0 1 ${vx + 6},${vy - 9} Z`} fill="#fff" stroke={S} strokeWidth={1.2} />
-    <line x1={vx + 7 * s} y1={vy} x2={vx + 11 * s} y2={vy} stroke={S} strokeWidth={1.5} />
+    <line x1={vx + AV_R * s} y1={vy} x2={vx + 11 * s} y2={vy} stroke={S} strokeWidth={1.5} />
     <line x1={vx + 11 * s} y1={vy} x2={vx + 11 * s} y2={vy + 5} stroke={S} strokeWidth={1.5} />
     <circle cx={cx} cy={cy} r={CONN_R} fill="#fff" stroke={S} strokeWidth={1.2} />
   </>);
@@ -117,15 +117,15 @@ export function ProfileIcons({ pts, icons }: { pts: { x: number; z: number }[]; 
     return undefined;
   };
   const draw = (list: ProfileIcon[]) => list.map(ic => {
-      const p = at(ic.x);
-      if (!p) return null;
-      const surge = ic.kind === 'sav' || ic.kind === 'qprv' ? ic.kind : null;
-      const dx = surge === 'sav' ? CONN_DX : -CONN_DX, cy = surge ? (yAtPx(p.px + dx) ?? p.py) - p.py : 0;
-      return (
-        <g key={`${ic.kind}@${ic.x}`} data-q17={ic.kind} data-x={ic.x} transform={`translate(${p.px},${p.py})`}>
-          {surge ? <SurgeGlyph kind={surge} cx={dx} cy={cy} ns={!!ic.ns} /> : <Glyph kind={ic.kind} />}
-        </g>
-      );
+    const p = at(ic.x);
+    if (!p) return null;
+    const surge = ic.kind === 'sav' || ic.kind === 'qprv' ? ic.kind : null;
+    const dx = surge === 'sav' ? CONN_DX : -CONN_DX, cy = surge ? (yAtPx(p.px + dx) ?? p.py) - p.py : 0;
+    return (
+      <g key={`${ic.kind}@${ic.x}`} data-q17={ic.kind} data-x={ic.x} transform={`translate(${p.px},${p.py})`}>
+        {surge ? <SurgeGlyph kind={surge} cx={dx} cy={cy} ns={!!ic.ns} /> : <Glyph kind={ic.kind} />}
+      </g>
+    );
   });
   // Pump, tank, valve: above the lines (line 400), below the axes (500). Air valves and the SAV / QPRV drawings
   // stand up off the pipe, so they go above the line dots too (scatter 600, e.g. Current HGL's dots).
