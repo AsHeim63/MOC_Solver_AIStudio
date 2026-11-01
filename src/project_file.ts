@@ -2,7 +2,8 @@
 // Pure: build the file from the inputs, or parse + check a file and return the inputs or a refusal message.
 // A file is taken whole or not at all (a message = refused, nothing changes).
 import type { PipeSection, PumpParams } from './types';
-import type { Operation, ValveSource } from './scenario_control';
+import type { Operation, ValveSource, ValveType } from './scenario_control';
+import { VALVE_TYPES } from './scenario_control';
 
 export const PROJECT_VERSION = 1;
 
@@ -14,7 +15,9 @@ export interface ProjectInputs {
   sourceElevation: number;
   outletPressure: number;
   inletPressure: number;
-  valve: { kv0: number; t0: number; tClose: number; exponent: number; checkValve: boolean };
+  // Q36: type / a / b / rho optional — files saved before Q36 open with today's default valve.
+  valve: { kv0: number; t0: number; tClose: number; exponent: number; checkValve: boolean;
+           type?: ValveType; a?: number; b?: number; rho?: number };
   pumpCurve: { Q: string; H: string }[];
   suctionPressure: string;   // as typed (m), like the curve cells
   preferences: { airValves: boolean };
@@ -57,6 +60,8 @@ export function parseProject(text: string): ProjectInputs | string {
     nums(j, ['sourceElevation', 'outletPressure', 'inletPressure']) &&
     obj(valve) && nums(valve, ['kv0', 't0', 'tClose', 'exponent']) && (valve.kv0 as number) > 0 &&
     typeof valve.checkValve === 'boolean' &&
+    (valve.type === undefined || VALVE_TYPES.some(([k]) => k === valve.type)) &&
+    ['a', 'b', 'rho'].every(k => valve[k] === undefined || num(valve[k])) &&
     Array.isArray(pumpCurve) && pumpCurve.every(r => obj(r) && typeof r.Q === 'string' && typeof r.H === 'string') &&
     typeof j.suctionPressure === 'string' &&
     obj(preferences) && typeof preferences.airValves === 'boolean';

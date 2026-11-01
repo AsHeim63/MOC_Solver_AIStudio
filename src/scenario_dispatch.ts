@@ -30,7 +30,7 @@ import {
     runWaterHammerSimulationGravityValve,
     PREPARE_pump, PREPARE_valve, PREPARE_gravityValve, SteadyStateResult,
     PipeSection, PumpParams, ReservoirParams,
-    ValveParams, ClosureLaw, SimulationResults,
+    ValveParams, ValveModel, ClosureLaw, SimulationResults,
     GateFinding, GateCode, GateKind, GATE_SEVERITY, VAPOR_HEAD_AT,
     PumpCurve, FIND_PUMP_CURVE, FIND_PUMP_DUTY_POINT, FIND_VALVE_CV0, AirValveBC, QprvBC, SavBC
 } from './solver';
@@ -63,7 +63,11 @@ export type ValveCoefficient = { Kv0: number } | { Cv0: number };
  */
 export const VAPOR_PRESSURE_GAUGE_M = VAPOR_HEAD_AT(0);
 
-export interface SelectorValveInput {
+/** Q36: valve type / closure mode (solver `ValveModel`), passed through to `ValveParams` unchanged. */
+const valveModelOf = (v: SelectorValveInput): ValveModel =>
+    ({ preset: v.preset, a: v.a, b: v.b, mode: v.mode, rho: v.rho, snap_shut: v.snap_shut });
+
+export interface SelectorValveInput extends ValveModel {   // Q36: all ValveModel fields optional
     coefficient: ValveCoefficient;
     law:         ClosureLaw;
 
@@ -377,7 +381,7 @@ export function buildScenarioArgs(scenario: Scenario, inputs: DispatchInputs): S
             if (!v) throw new Error('The pump-fed valve-closure scenario needs valve settings.');
             const valveParams: ValveParams = {
                 Cv0: toSolverCv0(v.coefficient), law: v.law,
-                H_down: resolveHDown(v, inputs.pipes), check_valve: v.check_valve
+                H_down: resolveHDown(v, inputs.pipes), check_valve: v.check_valve, ...valveModelOf(v)
             };
             // Neutralize the UI's trip/halt inputs: selecting this scenario must never
             // superimpose a pump trip on the closure (defect fix, user-observed S58).
@@ -409,7 +413,7 @@ export function buildScenarioArgs(scenario: Scenario, inputs: DispatchInputs): S
             }
             const valveParams: ValveParams = {
                 Cv0: toSolverCv0(v.coefficient), law: v.law,
-                H_down, check_valve: v.check_valve
+                H_down, check_valve: v.check_valve, ...valveModelOf(v)
             };
             return { kind: 'gravity-valve', pipes: inputs.pipes,
                      upstream: { head: g.head, elevation: g.elevation }, valve: valveParams };

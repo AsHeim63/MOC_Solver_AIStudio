@@ -29,6 +29,7 @@ import {
     SteadyStateResult, PipeSection, GateFinding, GateCode, GateKind, GateSeverity,
     GATE_SEVERITY, VAPOR_HEAD_AT, COMPUTE_TRAVEL_TIME,
     FIND_VALVE_CV0, FIND_GRAVITY_DRIVING_HEAD, FIND_INIT_ADMISSIBLE,
+    FIND_VALVE_MODEL, FIND_VALVE_STROKE,
 } from './solver';
 import {
     Scenario, DispatchInputs, SelectorValveInput, dispatchSteadyState,
@@ -195,6 +196,7 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
     if (isValve && v) {
         for (const f of FIND_VALVE_CV0(toSolverCv0(v.coefficient))) add(f);
         checkB9(v, add);
+        for (const f of FIND_VALVE_MODEL(v, inputs.qprv !== undefined)) add(f);   // Q36
     } else {
         skip('B6', `${scenario} has no valve`);
         skip('B9', `${scenario} has no closure law`);
@@ -289,6 +291,8 @@ export function evaluateGate(scenario: Scenario, inputs: DispatchInputs): GateRe
                                                  isGravity ? 'gravity' : 'pump')) add(f);
             // A1 must not contradict the Reynolds guard's own verdict — see checkAdvisories.
             checkAdvisories(steady, inputs, v, add, reContractBlocked);
+            // Q36: closing time ≥ one time step (spec §3.5) — dt exists only once the line is meshed.
+            if (isValve && v?.law) for (const f of FIND_VALVE_STROKE(v.law, steady.init.baseDt)) add(f);
             // Q10: A7 — duty point outside the entered flow range (Q6-e; both sides, builder's pick).
             if (curveIn) {
                 const Qs = curveIn.points.map(p => p.Q), Q0 = steady.pump.initialFlow;

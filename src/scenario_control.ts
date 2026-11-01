@@ -14,9 +14,31 @@
 // into `dispatchSimulation` and record which entry point ran.
 
 import { Scenario } from './scenario_dispatch';
+import { ValveModel, VALVE_BUTTERFLY_A, VALVE_GATE_B, VALVE_RHO_DEFAULT } from './solver';
 
 export type Operation   = 'pump-operation' | 'valve-operation';
 export type ValveSource = 'pump' | 'reservoir';
+
+// Q36: the valve-type control — ONE list over the solver's valve types and closure modes. A type and a
+// non-position mode are never combined (gravity_fed_valve_spec.md §3.4), so one list cannot pick a
+// refused pair. 'generic' sends no field at all: today's run, bit-identical.
+export type ValveType = 'generic' | 'butterfly' | 'gate' | 'globe-linear' | 'linear-resistance' | 'linear-flow';
+export const VALVE_TYPES: [ValveType, string][] = [
+    ['generic', 'Default'], ['butterfly', 'Butterfly'], ['gate', 'Gate'],
+    ['globe-linear', 'Globe (linear)'], ['linear-resistance', 'Linear resistance'], ['linear-flow', 'Linear flow'],
+];
+export const VALVE_TYPE_PARAMS = { a: VALVE_BUTTERFLY_A.def, b: VALVE_GATE_B.def, rho: VALVE_RHO_DEFAULT };
+
+export function valveModelFromControl(type: ValveType, p: { a: number; b: number; rho: number }): ValveModel {
+    switch (type) {
+        case 'generic':           return {};
+        case 'butterfly':         return { preset: 'butterfly', a: p.a };
+        case 'gate':              return { preset: 'gate', b: p.b };
+        case 'globe-linear':      return { preset: 'globe-linear' };
+        case 'linear-resistance': return { mode: 'linear-resistance', rho: p.rho };
+        case 'linear-flow':       return { mode: 'linear-flow' };
+    }
+}
 
 /** The source sub-choice is read only on `Valve-Operation`; on `Pump-Operation` it is ignored. */
 export function scenarioFromControl(operation: Operation, source: ValveSource): Scenario {

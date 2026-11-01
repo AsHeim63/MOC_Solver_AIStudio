@@ -99,6 +99,9 @@ export interface SimulationResults {
     // Q22: only with a SAV (SECTION 7i). opening = its opening s ∈ [0,1] per fullHistory entry, as
     // qprv.opening. Unhashed telemetry, read by the sizing stage (surge_valves.ts).
     sav?: { opening: number[] };
+    // Q36: only with the linear-flow valve mode. Commanded minus actual valve flow Q_cmd − Q [m³/s] per
+    // fullHistory entry (> 0 = shortfall: cap binding or cavitation, spec §3.3c / OI-4). Unhashed.
+    valveShortfall?: number[];
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2227,6 +2230,15 @@ function runCore(
         ...qprv
     } : undefined;
     let qpOpen = 0.0;
+    // Q36: valve type / closure mode refused here too for direct solver callers (the gate refuses first).
+    if (valve !== undefined) {
+        const bad = FIND_VALVE_MODEL(valve, qprv !== undefined);
+        if (bad.length) throw new Error(`runCore: ${bad[0].message}`);
+    }
+    // Q36 linear-flow (spec §3.3c): Q0 = the run's own steady valve flow; the shortfall Q_cmd − Q per
+    // fullHistory entry is reported (OI-4), unhashed telemetry like qprv.opening.
+    const lfQ0   = valve?.mode === 'linear-flow' ? prevFlow.nodeQout(reservoirBCs[0].node) : undefined;
+    const lfTele = lfQ0 !== undefined ? [0.0] : undefined;
     // Q21 telemetry: opening[i] = the opening at fullHistory[i].time (both seeded at t = 0 and pushed
     // once per step, so equal lengths; measured, findings/q21/align_Q21.ts).
     const qpTele = qp && { H_open: qp.H_open, opening: [qpOpen] };
@@ -2415,7 +2427,7 @@ function runCore(
                 pipeMIAB, bc.pipeIdx, -1, pe.p.N, -1, layout.nodeIds
             );
             const avE = valve !== undefined ? avAt?.get(bc.node) : undefined;
-            const valveShut = valve !== undefined && valve.Cv0 * evalTau(valve.law, t) <= 0.0;
+            const valveShut = valve !== undefined && resolveCv(valve, t, coefsRes.Cp, coefsRes.B1, lfQ0) <= 0.0;
             let qpDone = false;   // Q19: the QPRV discharged and wrote the node (SECTION 7h)
             if (valve !== undefined && qp !== undefined) {
                 // Air pocket (below atmospheric), or a vapour cavity at the shut valve: the QPRV closes
@@ -2433,9 +2445,12 @@ function runCore(
                 newFlow.setQin(bc.node, AIR_VALVE_END(bc.node, avE,
                     { C: coefsRes.Cp, B: coefsRes.B1, dxA: pe.p.dx * pe.p.A, incoming: true }));
             } else if (valve !== undefined) {
-                CALC_BC_VALVE(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, pe.p);
+                CALC_BC_VALVE(bc.node, coefsRes, prevState, newState, newFlow, grid, valve, t, pe.p, lfQ0);
             } else {
                 CALC_BC_RESERVOIR(bc.node, coefsRes, prevState, newState, newFlow, bc.head);
+            }
+            if (lfTele !== undefined && valve !== undefined && lfQ0 !== undefined) {
+                lfTele.push(valveFlowCommand(valve, t, lfQ0) - newFlow.nodeQout(bc.node));   // Q36: Q_cmd − Q
             }
         }
 
@@ -2542,7 +2557,8 @@ function runCore(
     return { timeSteps, nodes, timeHistory, fullHistory, paths,
              ...(avPocket !== undefined && { airPocketMax: avPocket }),
              ...(qpTele !== undefined && { qprv: qpTele }),
-             ...(svTele !== undefined && { sav: svTele }) };
+             ...(svTele !== undefined && { sav: svTele }),
+             ...(lfTele !== undefined && { valveShortfall: lfTele }) };
 }
 
 // ── PREPARE_pump — moved from runWaterHammerSimulation (Row 3.11 Unit A, S65) ──
@@ -2930,7 +2946,7 @@ export type ClosureLaw =
   | { law: 'parabolic'; t0: number; T_close: number; n: number }
   | { law: 'custom';    points: ReadonlyArray<{ t: number; tau: number }> };
 
-export interface ValveParams {
+export interface ValveParams extends ValveModel {   // Q36: valve type / closure mode, optional only
     Cv0:         number;      // solver-internal SI coefficient [m^2.5/s] = Kv0/11493.9 (3.0b freeze;
                               // conversion happens at input-validation — the solver NEVER sees Kv0)
     law:         ClosureLaw;
@@ -2975,6 +2991,83 @@ export function evalTau(law: ClosureLaw, t: number): number {
     }
 }
 
+// ── Q36 / step 3.8: valve type and closure mode (knowledge/gravity_fed_valve_spec.md §3) ──────────
+// Every type and mode reduces to ONE Cv per step (resolveCv), fed to the unchanged SECTION 7e solve
+// (spec §3.1): no new solve, no iteration (DOMAIN §5/§8, Bug #8). All fields absent = today's
+// `valve.Cv0 * evalTau(valve.law, t)`, the same operations in the same order (bit-identity, §3.1).
+export type ValvePreset = 'generic' | 'butterfly' | 'gate' | 'globe-linear';
+export type ValveMode   = 'position' | 'linear-resistance' | 'linear-flow';
+export interface ValveModel {
+    preset?:    ValvePreset;  // inherent characteristic Φ (§3.2, S56 OI-2); absent = 'generic' (today)
+    a?:         number;       // butterfly a ∈ [3,4]; absent = VALVE_BUTTERFLY_A.def
+    b?:         number;       // gate b ∈ [0.2,0.3]; absent = VALVE_GATE_B.def
+    mode?:      ValveMode;    // closure behaviour (§3.3); absent = 'position' (today)
+    rho?:       number;       // linear-resistance: end ÷ start resistance, > 1 (OI-3); absent = VALVE_RHO_DEFAULT
+    snap_shut?: boolean;      // linear-resistance: Cv := 0 at end of stroke; absent = true (OI-3)
+}
+// Ruled ranges (S56 OI-2). Point defaults are not ruled (spec §3.2): the builder takes the end of each
+// range that gives the higher surge (ACCEPT_Q36 check 15: a = 4 and b = 0.2 give the highest peaks at
+// T_close 10 s) — the conservative choice; listed in builder/LOOK-AT.md for Assaf.
+export const VALVE_BUTTERFLY_A = { min: 3, max: 4, def: 4 } as const;
+export const VALVE_GATE_B      = { min: 0.2, max: 0.3, def: 0.2 } as const;
+export const VALVE_RHO_DEFAULT = 100;   // not ruled; the spec's worked value (ACCEPT_Q36 check 10)
+
+/** Φ(x) = Cv(x)/Cv0 at opening x ∈ [0,1] (spec §3.2 RESOLVED, Cv-ratio form; Φ(0) = 0, Φ(1) = 1). */
+export function valvePhi(preset: ValvePreset, x: number, param?: number): number {
+    switch (preset) {
+        case 'butterfly': {
+            const a = param ?? VALVE_BUTTERFLY_A.def;
+            return (Math.exp(a * x) - 1.0) / (Math.exp(a) - 1.0);
+        }
+        case 'gate':         return Math.pow(x, param ?? VALVE_GATE_B.def);
+        case 'globe-linear':
+        case 'generic':      return x;
+    }
+}
+
+/** Stroke fraction s = clamp((t − t0)/T_close, 0, 1) of the linear ramp the two modes use (§3.3b/c). */
+function valveStroke(law: ClosureLaw, t: number): number {
+    if (law.law === 'custom') throw new Error('Valve closure mode: the linear-resistance and linear-flow modes need a closure start time and closing time; a custom opening table has neither.');
+    if (t < law.t0) return 0.0;
+    return Math.min(1.0, (t - law.t0) / law.T_close);
+}
+
+/** Linear-flow command Q_cmd = Q0·(1 − s) (§3.3c); Q0 = the run's steady valve flow. */
+export function valveFlowCommand(valve: ValveParams, t: number, Q0: number): number {
+    return Q0 * (1.0 - valveStroke(valve.law, t));
+}
+
+/**
+ * The valve's Cv at time t (spec §3.1/§3.3). Cp, B1: the arriving C+ at the valve node; Q0: the steady
+ * valve flow — needed by 'linear-flow' only. Closed form, evaluated once per step, writes nothing.
+ */
+export function resolveCv(valve: ValveParams, t: number, Cp?: number, B1?: number, Q0?: number): number {
+    const mode = valve.mode ?? 'position';
+    if (mode === 'position') {
+        const preset = valve.preset ?? 'generic';
+        if (preset === 'generic') return valve.Cv0 * evalTau(valve.law, t);      // today, bit-identical
+        return valve.Cv0 * valvePhi(preset, evalTau(valve.law, t), preset === 'butterfly' ? valve.a : valve.b);
+    }
+    if (mode === 'linear-flow' && (Cp === undefined || B1 === undefined || Q0 === undefined)) {
+        throw new Error('resolveCv: the linear-flow closure mode needs Cp, B1 and the steady flow Q0.');
+    }
+    const s = valveStroke(valve.law, t);
+    if (s <= 0.0) return valve.Cv0;                                  // stroke not started: fully open
+    if (mode === 'linear-resistance') {
+        // K_r = K_r0·(1 + (ρ − 1)·s) ⟹ Cv = Cv0/√(1 + (ρ − 1)·s); snap shut at end of stroke (OI-3)
+        if (s >= 1.0 && valve.snap_shut !== false) return 0.0;
+        return valve.Cv0 / Math.sqrt(1.0 + ((valve.rho ?? VALVE_RHO_DEFAULT) - 1.0) * s);
+    }
+    // linear-flow (§3.3c): the Cv that passes Q_cmd at the head the C+ line delivers at that flow,
+    // capped at fully open (OI-4: a binding cap or cavitation gives the physics flow, shortfall reported).
+    // Builder: at end of stroke (Q_cmd = 0) the valve is shut, also when Cp ≤ H_down.
+    if (s >= 1.0) return 0.0;
+    const Q_cmd = valveFlowCommand(valve, t, Q0!);
+    const dH    = Cp! - B1! * Q_cmd - valve.H_down;
+    const Cv_req = dH > 0.0 ? Q_cmd / Math.sqrt(dH) : valve.Cv0;
+    return Math.min(Cv_req, valve.Cv0);
+}
+
 /**
  * BOX: CALC_BC_VALVE — valve-closure boundary (right end, last node) — Section 7e
  *
@@ -3001,7 +3094,8 @@ function CALC_BC_VALVE(
     grid:      GridParams,
     valve:     ValveParams,
     t:         number,
-    pipe:      PipeParams
+    pipe:      PipeParams,
+    Q0?:       number             // Q36: steady valve flow, linear-flow mode only
 ): void {
     const { Cp, B1 } = coefs;
     const dt        = grid.dt;
@@ -3012,8 +3106,7 @@ function CALC_BC_VALVE(
     const H_vap     = Z + VAPOR_H_REL;
     const H_abs_vap = H_BARO + VAPOR_H_REL;
 
-    const tau = evalTau(valve.law, t);
-    const Cv  = valve.Cv0 * tau;
+    const Cv  = resolveCv(valve, t, Cp, B1, Q0);   // Q36: = valve.Cv0 * evalTau(valve.law, t) by default
 
     if (Cv <= 0.0) {
         // ── FULLY CLOSED: dead-end DGCM (spec §3.3 — pump-STOPPED mirror, C+ side) ──
@@ -3152,7 +3245,7 @@ function CALC_BC_QPRV(
 ): { s: number; done: boolean } {
     const { Cp, B1 } = coefs;
     const Z  = prevState.Z[idx];
-    const Cv = valve.Cv0 * evalTau(valve.law, t);
+    const Cv = resolveCv(valve, t);   // Q36 (linear-flow + QPRV is refused: FIND_VALVE_MODEL)
     const Qv = (H: number): number => {
         if (Cv <= 0.0) return 0.0;
         const d = H - valve.H_down;
@@ -3796,6 +3889,64 @@ export function FIND_VALVE_CV0(Cv0: number): GateFinding[] {
         }];
     }
     return [];
+}
+
+/**
+ * Q36 (spec §3.4/§3.5, S56 OI-2/OI-3): valve type and closure mode — names, ruled parameter ranges,
+ * type × mode compatibility, and linear-flow with a QPRV (its command assumes the valve is the node's
+ * only outlet). All fields absent = nothing to check. B9, as the other closure-law checks.
+ */
+export function FIND_VALVE_MODEL(v: ValveModel & { law?: ClosureLaw }, hasQprv: boolean): GateFinding[] {
+    const out: GateFinding[] = [];
+    const add = (where: string, message: string) =>
+        out.push({ code: 'B9', severity: GATE_SEVERITY('B9'), kind: 'contract-violation', where, message });
+    const preset = v.preset ?? 'generic', mode = v.mode ?? 'position';
+    const inRange = (x: number, r: { min: number; max: number }) => Number.isFinite(x) && x >= r.min && x <= r.max;
+    if (!['generic', 'butterfly', 'gate', 'globe-linear'].includes(preset)) {
+        add('Valve type', `Valve type "${preset}" is not one this program knows. Choose the default, butterfly, gate or globe (linear).`);
+    }
+    if (!['position', 'linear-resistance', 'linear-flow'].includes(mode)) {
+        add('Closure mode', `Closure mode "${mode}" is not one this program knows.`);
+    }
+    if (preset === 'butterfly' && v.a !== undefined && !inRange(v.a, VALVE_BUTTERFLY_A)) {
+        add('Butterfly valve parameter a', `Butterfly valve parameter a is ${v.a}. It must be between ` +
+            `${VALVE_BUTTERFLY_A.min} and ${VALVE_BUTTERFLY_A.max}, the range ruled for a standard concentric butterfly valve.`);
+    }
+    if (preset === 'gate' && v.b !== undefined && !inRange(v.b, VALVE_GATE_B)) {
+        add('Gate valve parameter b', `Gate valve parameter b is ${v.b}. It must be between ` +
+            `${VALVE_GATE_B.min} and ${VALVE_GATE_B.max}, the range ruled for a gate valve.`);
+    }
+    if (mode === 'linear-resistance' && v.rho !== undefined && !(Number.isFinite(v.rho) && v.rho > 1)) {
+        add('Resistance ratio ρ', `The end-to-start resistance ratio ρ is ${v.rho}. It must be greater than 1: ` +
+            `the valve's resistance has to rise while it closes.`);
+    }
+    if (v.snap_shut !== undefined && typeof v.snap_shut !== 'boolean') {
+        add('Shut at end of stroke', `"Shut at end of stroke" must be yes or no (given ${String(v.snap_shut)}).`);
+    }
+    if (preset !== 'generic' && mode !== 'position') {
+        add('Valve type / closure mode', `The ${preset} valve type cannot be combined with the ${mode} ` +
+            `closure mode: that mode sets the valve's ${mode === 'linear-flow' ? 'flow' : 'resistance'} ` +
+            `directly, so the valve's own opening curve has no role. Choose the default valve type, or the position mode.`);
+    }
+    if (mode !== 'position' && v.law?.law === 'custom') {
+        add('Closure mode', `The ${mode} closure mode needs a closure start time and a closing time; ` +
+            `a custom opening table has neither.`);
+    }
+    if (mode === 'linear-flow' && hasQprv) {
+        add('Closure mode / QPRV', 'The linear-flow closure mode cannot be used together with a QPRV: the ' +
+            'valve opening that gives the commanded flow is worked out with the valve as the only outlet ' +
+            'at the line end. Remove the QPRV or choose another closure mode.');
+    }
+    return out;
+}
+
+/** Q36 (spec §3.5): the closing time must be at least one time step dt, for every mode. */
+export function FIND_VALVE_STROKE(law: ClosureLaw, dt: number): GateFinding[] {
+    if (law.law === 'custom' || !(law.T_close > 0 && law.T_close < dt)) return [];   // ≤ 0: checkB9's
+    return [{ code: 'B9', severity: GATE_SEVERITY('B9'), kind: 'contract-violation', where: 'Closing time',
+              message: `Closing time is ${law.T_close} s, shorter than one calculation time step ` +
+                       `(${dt.toPrecision(4)} s) on this line. The closure would happen between two steps. ` +
+                       `Enter a closing time of at least one time step.` }];
 }
 
 /**

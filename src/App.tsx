@@ -51,7 +51,7 @@ import { dispatchSimulation, Scenario, DispatchInputs } from './scenario_dispatc
 import { sizeAirValves, AirValveStudy, shownOutletMm, MIN_GAUGE_HEAD_M, ADD_VALVE_HEAD_M } from './air_valves';
 import { holdFilter, heldPockets } from './hold_filter';   // Q31
 import { QprvStudy, peakAll, sizeSav, SavStudy, SAV_NOTE_EAS } from './surge_valves';
-import { scenarioFromControl, Operation, ValveSource } from './scenario_control';
+import { scenarioFromControl, Operation, ValveSource, ValveType, VALVE_TYPES, VALVE_TYPE_PARAMS, valveModelFromControl } from './scenario_control';
 import { ProfileIcons, profileIcons } from './profile_icons';   // Q17
 import { Report, SetView, solutionSets } from './report';   // Q24, Q23
 import { projectText, parseProject } from './project_file';   // Q25
@@ -270,6 +270,9 @@ export default function App() {
   const [valveT0, setValveT0] = useState(2.0);
   const [valveTClose, setValveTClose] = useState(1.0);
   const [valveExponent, setValveExponent] = useState(2);
+  // Q36: valve type / closure mode and its parameter (a, b, ρ); 'generic' = today's run.
+  const [valveType, setValveType] = useState<ValveType>('generic');
+  const [valveTypeParams, setValveTypeParams] = useState(VALVE_TYPE_PARAMS);
   // Holds the message when the solver refuses a run, so it can be shown on screen (S62).
   const [simError, setSimError] = useState<string | null>(null);
   
@@ -564,6 +567,7 @@ export default function App() {
         law: { law: 'parabolic', t0: valveT0, T_close: valveTClose, n: valveExponent },
         downstreamPressure: outletPressure,
         check_valve: valveCheckValve,
+        ...valveModelFromControl(valveType, valveTypeParams),   // Q36
       },
       gravity: scenario === 'gravity-valve'
         ? { head: inletPressure + sourceElevation, elevation: sourceElevation }
@@ -593,7 +597,8 @@ export default function App() {
   const saveProject = () => {
     setProjectMsg(null);
     const text = projectText({ operation, valveSource, pipes, pump, sourceElevation, outletPressure, inletPressure,
-      valve: { kv0: valveKv0, t0: valveT0, tClose: valveTClose, exponent: valveExponent, checkValve: valveCheckValve },
+      valve: { kv0: valveKv0, t0: valveT0, tClose: valveTClose, exponent: valveExponent, checkValve: valveCheckValve,
+               type: valveType, ...valveTypeParams },
       pumpCurve: curveRows, suctionPressure: suctionText, preferences: { airValves: avApproved } });
     const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
     const a = document.createElement('a');
@@ -613,6 +618,9 @@ export default function App() {
     setSourceElevation(p.sourceElevation); setOutletPressure(p.outletPressure); setInletPressure(p.inletPressure);
     setValveKv0(p.valve.kv0); setValveT0(p.valve.t0); setValveTClose(p.valve.tClose);
     setValveExponent(p.valve.exponent); setValveCheckValve(p.valve.checkValve);
+    setValveType(p.valve.type ?? 'generic');   // Q36: older files have no valve type = today's default
+    setValveTypeParams({ a: p.valve.a ?? VALVE_TYPE_PARAMS.a, b: p.valve.b ?? VALVE_TYPE_PARAMS.b,
+                         rho: p.valve.rho ?? VALVE_TYPE_PARAMS.rho });
     setCurveRows(p.pumpCurve); setSuctionText(p.suctionPressure); approveAirValves(p.preferences.airValves);
     // Results on screen belong to the old inputs.
     stopQprvStudy();
@@ -963,7 +971,10 @@ export default function App() {
     data.push(...(scenario === 'pump-trip'
       ? [['Pump trip at', `${pump.tripTime} s`], ['Pump halt time', `${pump.haltTime} s`]]
       : [[`Valve ${uu.valve}`, `${fmt('valve', uu.valve, valveKv0)} ${valveBasis(uu.valve)}`], ['Closure start', `${valveT0} s`], ['Closure time', `${valveTClose} s`],
-         ['Closure exponent', String(valveExponent)]]) as [string, string][],
+         ['Closure exponent', String(valveExponent)],
+         ['Valve type', VALVE_TYPES.find(([k]) => k === valveType)![1] +
+           (valveType === 'butterfly' ? ` (a = ${valveTypeParams.a})` : valveType === 'gate' ? ` (b = ${valveTypeParams.b})`
+            : valveType === 'linear-resistance' ? ` (ρ = ${valveTypeParams.rho})` : '')]]) as [string, string][],
       [`Pressure at ${scenario === 'pump-trip' ? 'System Outlet' : "Valve's Outlet"}`, show('pressure', outletPressure)],
       ['Elevation at X = 0', show('length', sourceElevation)]);
     const name = scenario === 'pump-trip' ? 'Pump-Operation — pump trip'
@@ -1302,7 +1313,35 @@ export default function App() {
                         onValue={v => setValveExponent(Number(v))}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
                     </div>
+                    {/* Q36: valve type / closure mode (plan step 3.8) and its one parameter */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Valve Type</label>
+                      <select value={valveType} onChange={e => setValveType(e.target.value as ValveType)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all">
+                        {VALVE_TYPES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                      </select>
+                    </div>
+                    {(['butterfly', 'gate', 'linear-resistance'] as ValveType[]).includes(valveType) && (() => {
+                      const key = valveType === 'butterfly' ? 'a' : valveType === 'gate' ? 'b' : 'rho';
+                      const label = key === 'a' ? 'Butterfly a (3 – 4)' : key === 'b' ? 'Gate b (0.2 – 0.3)' : 'Resistance Ratio (> 1)';
+                      return (
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{label}</label>
+                          <UnitInput step={key === 'b' ? '0.01' : key === 'a' ? '0.1' : '1'} value={String(valveTypeParams[key])}
+                            onValue={v => setValveTypeParams(p => ({ ...p, [key]: Number(v) }))}
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+                        </div>
+                      );
+                    })()}
                   </div>
+                  {(valveType === 'linear-resistance' || valveType === 'linear-flow') && (
+                    <p className="text-[10px] text-slate-400">
+                      {valveType === 'linear-resistance'
+                        ? 'Linear resistance: the valve resistance rises in a straight line from Closure Start over the Closure Time to that ratio times its open value, then the valve shuts.'
+                        : 'Linear flow: the valve flow falls in a straight line from the steady flow to zero over the Closure Time; if the line cannot deliver that flow, the physics flow is used.'}
+                      {' '}The Closure Exponent is not used.
+                    </p>
+                  )}
                   <p className="text-[10px] text-slate-400">
                     Valve scenarios ignore the pump Trip/Halt times — the valve closure is the
                     only transient event. The gravity-fed scenario ignores the whole Pump &amp;
